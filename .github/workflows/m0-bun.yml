@@ -406,7 +406,7 @@ jobs:
             for p in version js-engine engine-usable tls platform; do
               s=$(status_of "$p")
               case "$s" in
-                PASS|") ;;
+                PASS|"") ;;
                 *) findings="$findings API$api:$p=$s" ;;
               esac
             done

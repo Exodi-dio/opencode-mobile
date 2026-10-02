@@ -90,7 +90,12 @@ probe() {
 # --- the five probes ---------------------------------------------------------
 probe version       "1.4.2"       30 "$BUN" --version
 probe js-engine     "2"           30 "$BUN" -e 'console.log(1+1)'
-probe engine-usable "done"        30 "$BUN" -e 'for(let i=0;i<3e7;i++){}; console.log("done")'
+# The loop accumulates and prints an observable value. The brief's bare
+# `for(...){}` has no side effect and a JIT may delete it entirely, which would
+# let the probe pass without executing the loop - a vacuous assertion. Printing
+# `s` makes the loop unremovable. The 30 s budget and the `done` marker are the
+# brief's.
+probe engine-usable "done"        30 "$BUN" -e 'let s=0;for(let i=0;i<3e7;i++){s=(s+i)|0}console.log("done",s)'
 # R3. A catch is deliberate: without it an unhandled rejection reports nothing
 # useful and may hang. FETCH_ERROR is the R3 finding and is preserved verbatim.
 probe tls           "200"         30 "$BUN" -e 'try{const r=await fetch("https://api.github.com");console.log(r.status)}catch(e){console.log("FETCH_ERROR: "+(e&&e.message));process.exit(9)}'
@@ -132,7 +137,7 @@ echo "BUN_VERSION_LINE=\"$(escape "$ver")\" BUN_REVISION=\"$(escape "$rev")\""
 # with runtime code generation, but they are NOT proof: they can come from
 # Bionic/JSC trampolines, and the `shell` domain's execmem policy is not the app
 # domain's. This is why JIT_DETERMINATION stays OPEN; see docs/spikes/r1-bun.md.
-maps=$("$BUN" -e 'function hot(n){let s=0;for(let i=0;i<n;i++){s=(s+i*3)|0}return s}hot(3e7);const lines=require("fs").readFileSync("/proc/self/maps","utf8").split("\n");let anon=0,file=0,wx=0,sample="";for(const l of lines){if(!l)continue;const p=l.trim().split(/\s+/);const perms=p[1]||"";if(perms.indexOf("x")<0)continue;const path=p.length>5?p.slice(5).join(" "):"";if(path===""||path.charAt(0)==="["){anon++;if(sample==="")sample=path||"[anon]"}else{file++}if(perms.indexOf("w")>=0)wx++}console.log("exec_anon="+anon+" exec_file="+file+" w_and_x="+wx+" sample="+sample)' 2>&1)
+maps=$("$BUN" -e 'function hot(n){let s=0;for(let i=0;i<n;i++){s=(s+i*3)|0}return s}const h=hot(3e7);const lines=require("fs").readFileSync("/proc/self/maps","utf8").split("\n");let anon=0,file=0,wx=0,sample="";for(const l of lines){if(!l)continue;const p=l.trim().split(/\s+/);const perms=p[1]||"";if(perms.indexOf("x")<0)continue;const path=p.length>5?p.slice(5).join(" "):"";if(path===""||path.charAt(0)==="["){anon++;if(sample==="")sample=l.trim()}else{file++}if(perms.indexOf("w")>=0)wx++}console.log("hot="+h+" exec_anon="+anon+" exec_file="+file+" w_and_x="+wx+" sample="+sample)' 2>&1)
 rc=$?
 if [ "$rc" -ne 0 ]; then
   maps="UNREADABLE(rc=$rc): $(escape "$maps")"
