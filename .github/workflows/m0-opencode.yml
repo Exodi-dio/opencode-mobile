@@ -391,6 +391,7 @@ jobs:
           set -uo pipefail
           mkdir -p out
           : > out/arm64-strace.txt
+          : > out/arm64-unimp.txt
           out=$(qemu-aarch64 -L out/sysroot-root/sysroot \
             opencode-linux-arm64-android/bin/opencode --version 2> out/arm64-stderr.txt) || rc=$?
           : "${rc:=0}"
@@ -417,6 +418,9 @@ jobs:
           qemu-aarch64 -strace -L out/sysroot-root/sysroot opencode-linux-arm64-android/bin/opencode --version 2> out/arm64-strace.txt || true
           echo "ARM64_STRACE_FIRST=\"$(head -3 out/arm64-strace.txt | tr '\n' ';' | head -c 240)\"" >> out/arm64-link.log
 
+          qemu-aarch64 -d unimp -L out/sysroot-root/sysroot opencode-linux-arm64-android/bin/opencode --version 2> out/arm64-unimp.txt || true
+          echo "ARM64_UNIMP=\"$(head -3 out/arm64-unimp.txt | tr '\n' ';' | head -c 240)\"" >> out/arm64-link.log
+
       - name: Capture qemu syscall trace on failure
         if: failure()
         run: |
@@ -435,6 +439,7 @@ jobs:
             out/arm64-link.log
             out/arm64-stderr.txt
             out/arm64-strace.txt
+            out/arm64-unimp.txt
           if-no-files-found: error
           retention-days: 30
 
