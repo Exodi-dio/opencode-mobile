@@ -18,11 +18,18 @@ permissions:
 env:
   UPSTREAM_REPO: anomalyco/opencode
   UPSTREAM_SHA: 1ddb0873aee50d209d1a8d7f91b89c5daf692d49
-  UPSTREAM_VERSION: 1.18.34
   # See UPSTREAM.md. Bun 1.4.2 is the first release whose compile target
   # parser accepts `bun-linux-{arm64,x64}-android`.
   BUN_VERSION: 1.4.2
-  TARGET_FILTER: opencode-linux-arm64-android,opencode-linux-x64-android
+  # Consumed by the patch's target filter: one build.ts invocation emits both
+  # Android binaries, each into its own dist/ subdirectory. A matrix over the
+  # two architectures would repeat identical work.
+  OPENCODE_TARGET_FILTER: opencode-linux-arm64-android,opencode-linux-x64-android
+  # packages/script enforces ^1.3.14 from upstream's packageManager field, which
+  # 1.4.2 satisfies. Pin the version so the binary is not stamped with the
+  # placeholder that a detached-HEAD `git branch` would produce.
+  OPENCODE_VERSION: "1.18.34"
+  OPENCODE_CHANNEL: latest
 
 jobs:
   patch-verify:
@@ -57,16 +64,6 @@ jobs:
     needs: patch-verify
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    env:
-      # Consumed by the patch's target filter: one build.ts invocation emits
-      # both Android binaries, each into its own dist/ subdirectory. A matrix
-      # over the two architectures would repeat identical work.
-      OPENCODE_TARGET_FILTER: ${{ env.TARGET_FILTER }}
-      # packages/script reads packageManager ("bun@1.3.14") and enforces ^1.3.14;
-      # 1.4.2 satisfies that. Pin OPENCODE_VERSION so the binary is not stamped
-      # with a placeholder version derived from an empty `git branch`.
-      OPENCODE_VERSION: ${{ env.UPSTREAM_VERSION }}
-      OPENCODE_CHANNEL: latest
     steps:
       - uses: actions/checkout@v4
 

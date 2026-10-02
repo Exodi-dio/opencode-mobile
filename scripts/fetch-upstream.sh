@@ -24,11 +24,13 @@ if [ -e "$dest" ]; then
   exit 1
 fi
 
+repo="${UPSTREAM_REPO:-anomalyco/opencode}"
+
 # --no-checkout: with --filter=blob:none a bare clone checks out the default
 # branch and pays to fetch that whole tree's blobs before we ask for a
 # different commit. Staying on the commit avoids paying twice.
-echo "cloning anomalyco/opencode (blobless) ..." >&2
-git clone --filter=blob:none --no-checkout --quiet https://github.com/anomalyco/opencode.git "$dest" >&2
+echo "cloning $repo (blobless) ..." >&2
+git clone --filter=blob:none --no-checkout --quiet "https://github.com/$repo.git" "$dest" >&2
 
 echo "checking out $sha ..." >&2
 git -C "$dest" checkout --quiet "$sha" >&2
