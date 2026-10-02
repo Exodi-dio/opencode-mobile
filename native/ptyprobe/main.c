@@ -40,6 +40,8 @@
 #include <sys/ioctl.h>
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
+#else
+#define PROP_VALUE_MAX 128
 #endif
 #include <sys/types.h>
 #include <sys/wait.h>
