@@ -156,9 +156,11 @@ jobs:
         id: ndk
         uses: nttld/setup-ndk@v1
         with:
-          # NDK r27c, resolved from Google's repository manifest rather than
-          # from a floating "r27c" alias.
-          ndk-version: 27.2.12479018
+          # NDK r27c. This action fetches
+          # https://dl.google.com/android/repository/android-ndk-r27c-linux.zip,
+          # so it wants the r-alias, not the sdkmanager revision
+          # (27.2.12479018 - that spelling returns HTTP 404).
+          ndk-version: r27c
 
       - name: Build ptyprobe for x86_64 android${{ matrix.api-level }}
         run: |
