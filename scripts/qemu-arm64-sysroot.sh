@@ -75,17 +75,17 @@ rt="$mp/system/apex/com.android.runtime"
 if [ -d "$rt" ]; then
   echo "runtime dir: $rt"
   sudo mkdir -p "$sysroot/apex/com.android.runtime"
-  sudo cp -a "$rt/." "$sysroot/apex/com.android.runtime/"
-  sudo cp -a "$rt/bin/." "$sysroot/system/bin/" || true
-  sudo cp -a "$rt/lib64/." "$sysroot/system/lib64/" || true
+  sudo cp -rL "$rt/." "$sysroot/apex/com.android.runtime/" || true
+  sudo cp -rL "$rt/bin/." "$sysroot/system/bin/" || true
+  sudo cp -rL "$rt/lib64/." "$sysroot/system/lib64/" || true
 fi
 rt2=$(sudo find "$mp" -maxdepth 6 -path '*com.android.runtime*/bin/linker64' 2>/dev/null | head -1 || true)
 [ -n "$rt2" ] && echo "runtime linker64: $rt2"
 # Fallbacks from the system tree itself (covers images with legacy layout).
 for cand in $(sudo find "$mp" \( -name linker64 -o -name 'libc.so' \) 2>/dev/null || true); do
   case "$cand" in
-    *linker64) sudo cp -a "$cand" "$sysroot/system/bin/linker64" ;;
-    *libc.so)  sudo cp -a "$(dirname "$cand")/." "$sysroot/system/lib64/" 2>/dev/null || true ;;
+    *linker64) sudo cp -rL "$cand" "$sysroot/system/bin/linker64" ;;
+    *libc.so)  sudo cp -rL "$(dirname "$cand")/." "$sysroot/system/lib64/" 2>/dev/null || true ;;
   esac
 done
 sudo chown -R "$(id -u):$(id -g)" "$sysroot" 2>/dev/null || true
