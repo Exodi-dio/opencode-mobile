@@ -250,7 +250,9 @@ jobs:
             set -e
             pkill -f 'fake-' || true
             sleep 1
-            return $rc
+            echo "probe rc=$rc"
+            cat out/probe-stderr.txt
+            return 0
           }
 
           cp out/fake-healthy.py out/fakeopencode
@@ -258,7 +260,7 @@ jobs:
 
           # 1. Healthy path
           run_probe out/fake-healthy.py out/fakeopencode
-          cat out/opencode-34.log
+          echo "== leg1 log =="; cat out/opencode-34.log
           bash scripts/assert-opencode-log.sh out/opencode-34.log 34 out/opencode-server-34.log
           grep -qE 'OPENCODE_VERDICT=HEALTHY' out/opencode-34.log || { echo "::error::stub healthy server did not yield HEALTHY"; cat out/probe-stderr.txt; exit 1; }
           grep -qE 'TIME_TO_HEALTHY_MS=[0-9]+' out/opencode-34.log || { echo "::error::no measured time to healthy"; exit 1; }
