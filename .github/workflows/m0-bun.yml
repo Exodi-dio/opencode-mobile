@@ -172,15 +172,27 @@ jobs:
           # Keep the device script valid POSIX sh.
           sh -n scripts/bun-probe-device.sh
 
+          # Runs the real on-device script with the workflow's EXIT= convention,
+          # without letting set -e abort before the exit code is recorded.
+          run_device_probe() {
+            bin="$1"; log="$2"
+            set +e
+            BUN="$bin" API_LEVEL=34 sh scripts/bun-probe-device.sh > "$log" 2>&1
+            rc=$?
+            set -e
+            echo "EXIT=$rc" >> "$log"
+            return "$rc"
+          }
+
           # 1. Happy path: the whole harness produces a COMPLETE result that the
           #    assert script accepts.
-          BUN="$PWD/out/fakebun" API_LEVEL=34 sh scripts/bun-probe-device.sh > out/stub-good.log 2>&1; echo "EXIT=$?" >> out/stub-good.log
+          run_device_probe "$PWD/out/fakebun" out/stub-good.log
           cat out/stub-good.log
           bash scripts/assert-bun-log.sh out/stub-good.log 34
 
           # 2. Crash path: a segfaulting bun's SIGSEGV is detected and preserved,
           #    and the harness still reaches COMPLETE.
-          BUN="$PWD/out/fakebun-crash" API_LEVEL=34 sh scripts/bun-probe-device.sh > out/stub-crash.log 2>&1; echo "EXIT=$?" >> out/stub-crash.log
+          run_device_probe "$PWD/out/fakebun-crash" out/stub-crash.log
           grep -q '^PROBE=version STATUS=CRASH EXIT=139 SIGNAL=11 ' out/stub-crash.log || {
             echo "::error::the harness did not record the stub's SIGSEGV as CRASH SIGNAL=11"
             cat out/stub-crash.log
@@ -189,7 +201,8 @@ jobs:
           bash scripts/assert-bun-log.sh out/stub-crash.log 34
 
           # 3. Missing binary: HARNESS_BROKEN must be rejected by the assert.
-          BUN=/nonexistent/bun API_LEVEL=34 sh scripts/bun-probe-device.sh > out/stub-missing.log 2>&1; echo "EXIT=$?" >> out/stub-missing.log
+          #    The device script exits 4 here, which is expected, not a failure.
+          run_device_probe /nonexistent/bun out/stub-missing.log || true
           grep -q '^BUN_PROBE_VERDICT=HARNESS_BROKEN ' out/stub-missing.log || {
             echo "::error::a missing bun binary did not produce HARNESS_BROKEN"
             cat out/stub-missing.log
