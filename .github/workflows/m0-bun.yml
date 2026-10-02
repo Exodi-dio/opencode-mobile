@@ -68,8 +68,8 @@ jobs:
           COLD_START_MS_SAMPLES=" 810 800 812 830 805" COLD_START_MS_MEDIAN=810 COLD_START_CLOCK=date-ns COLD_START_N=5
           RSS_VMHWM_KB=128000 RSS_SOURCE=/proc/<pid>/status RSS_NOTE="peak RSS of a sleeping bun process, sampled ~3s after start"
           BUN_VERSION_LINE="1.4.2" BUN_REVISION="UNSUPPORTED(rc=1)"
-          JIT_MAPS_OBSERVED="exec_anon=0 exec_file=3 w_and_x=0 sample="
-          JIT_DETERMINATION=OPEN JIT_BASIS="no positive in-binary signal"
+          JIT_MAPS_OBSERVED="hot=1 exec_anon=0 exec_file=3 w_and_x=0 sample="
+          JIT_SIGNAL=NONE JIT_DETERMINATION=OPEN JIT_BASIS="no [anon:JSJITCode] region observed in this synthetic fixture"
           BUN_PROBE_VERDICT=COMPLETE
           EXIT=0
           EOF
@@ -157,7 +157,7 @@ jobs:
             *"for(let i=0;i<3e7"*) echo done ;;
             *"fetch("*) echo 200 ;;
             *"process.platform"*) echo "android x64" ;;
-            *"/proc/self/maps"*) echo "exec_anon=1 exec_file=2 w_and_x=0 sample=[anon]" ;;
+            *"/proc/self/maps"*) echo "hot=1 exec_anon=1 exec_file=2 w_and_x=1 sample=[anon:JSJITCode]" ;;
             *"setTimeout"*) sleep 8 ;;
             *) echo "fakebun: unknown program" >&2; exit 64 ;;
           esac
@@ -189,6 +189,15 @@ jobs:
           run_device_probe "$PWD/out/fakebun" out/stub-good.log
           cat out/stub-good.log
           bash scripts/assert-bun-log.sh out/stub-good.log 34
+
+          # The JIT signal must be DERIVED from the observed mapping, not
+          # hardcoded: a [anon:JSJITCode] region has to yield POSITIVE. If this
+          # ever stops holding, the R1 verdict in the logs is untrustworthy.
+          grep -q '^JIT_SIGNAL=POSITIVE ' out/stub-good.log || {
+            echo "::error::a [anon:JSJITCode] mapping did not yield JIT_SIGNAL=POSITIVE"
+            cat out/stub-good.log
+            exit 1
+          }
 
           # 2. Crash path: a segfaulting bun's SIGSEGV is detected and preserved,
           #    and the harness still reaches COMPLETE.

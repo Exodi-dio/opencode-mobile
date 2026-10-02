@@ -131,19 +131,29 @@ rev=$("$BUN" --revision 2>&1); rc=$?
 [ "$rc" -eq 0 ] || rev="UNSUPPORTED(rc=$rc)"
 echo "BUN_VERSION_LINE=\"$(escape "$ver")\" BUN_REVISION=\"$(escape "$rev")\""
 
-# --- JIT: an observation, explicitly NOT a determination ---------------------
-# A hot loop encourages any JIT to map executable pages, then /proc/self/maps is
-# read from inside the process. Executable anonymous mappings are consistent
-# with runtime code generation, but they are NOT proof: they can come from
-# Bionic/JSC trampolines, and the `shell` domain's execmem policy is not the app
-# domain's. This is why JIT_DETERMINATION stays OPEN; see docs/spikes/r1-bun.md.
+# --- JIT: observation first, determination derived from it -------------------
+# A hot loop with an *observable* result forces JSC to actually run code (a
+# side-effect-free loop may be deleted), then /proc/self/maps is read from
+# inside the running process. A named JSC JIT region ([anon:JSJITCode]) is a
+# direct in-binary signal, not a timing inference.
 maps=$("$BUN" -e 'function hot(n){let s=0;for(let i=0;i<n;i++){s=(s+i*3)|0}return s}const h=hot(3e7);const lines=require("fs").readFileSync("/proc/self/maps","utf8").split("\n");let anon=0,file=0,wx=0,sample="";for(const l of lines){if(!l)continue;const p=l.trim().split(/\s+/);const perms=p[1]||"";if(perms.indexOf("x")<0)continue;const path=p.length>5?p.slice(5).join(" "):"";if(path===""||path.charAt(0)==="["){anon++;if(sample==="")sample=l.trim()}else{file++}if(perms.indexOf("w")>=0)wx++}console.log("hot="+h+" exec_anon="+anon+" exec_file="+file+" w_and_x="+wx+" sample="+sample)' 2>&1)
 rc=$?
 if [ "$rc" -ne 0 ]; then
   maps="UNREADABLE(rc=$rc): $(escape "$maps")"
 fi
 echo "JIT_MAPS_OBSERVED=\"$(escape "$maps")\""
-echo "JIT_DETERMINATION=OPEN JIT_BASIS=\"no positive in-binary signal settles whether JIT is active on Android; PR oven-sh/bun#29675 states Android has no upstream runtime test coverage and lists JIT W^X as not runtime-verified; see docs/spikes/r1-bun.md\""
+
+case "$maps" in
+  *JSJITCode*) jit_signal=POSITIVE ;;
+  *exec_anon=0*) jit_signal=NONE ;;
+  *) jit_signal=INCONCLUSIVE ;;
+esac
+if [ "$jit_signal" = "POSITIVE" ]; then
+  jit_determination=SHELL_DOMAIN_CONFIRMED_APP_DOMAIN_OPEN
+else
+  jit_determination=OPEN
+fi
+echo "JIT_SIGNAL=$jit_signal JIT_DETERMINATION=$jit_determination JIT_BASIS=\"$(escape "JIT signal is the [anon:JSJITCode] executable mapping read from /proc/self/maps inside the running Bun process, not a timing inference; it is measured in the adb shell SELinux domain, so W^X in untrusted_app_* is unverified and the app-domain and performance questions stay open; PR oven-sh/bun#29675 (closed, unmerged) states Android has no upstream runtime test platform and lists JIT W^X as not runtime-verified; see docs/spikes/r1-bun.md")\""
 
 # --- verdict -----------------------------------------------------------------
 # COMPLETE means "every probe was attempted and its outcome recorded". It says
