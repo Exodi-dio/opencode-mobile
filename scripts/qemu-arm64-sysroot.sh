@@ -60,15 +60,16 @@ fi
 mp=/mnt/sysroot-img
 
 echo "mounted at $mp"; ls "$mp" > /dev/null || true; ls "$mp" | head -20 || true
-ls -la "$mp/apex" || true
-ls -la "$mp/bin" | head || true
-find "$mp" -maxdepth 4 -name 'linker64*' || true
+sudo ls -la "$mp/apex" || true
+sudo ls -la "$mp/system" 2>/dev/null || true
+sudo ls "$mp/system/apex" 2>/dev/null || true
+sudo find "$mp/system/bin" "$mp/system/apex" -maxdepth 5 -name 'linker64*' 2>/dev/null || true
 
 # Collect libs and linker into the sysroot. Android 12+ keeps linker64 and
 # libc in com.android.runtime.apex; older images have them in system/bin64.
 sysroot="$out/sysroot"
 mkdir -p "$sysroot/system/bin" "$sysroot/system/lib64"
-apices=$(find "$mp" -path '*com.android.runtime*.apex' 2>/dev/null || true)
+apices=$(sudo find "$mp" -path '*com.android.runtime*.apex' 2>/dev/null || true)
 echo "runtime apexes: $apices"
 for ap in $apices; do
   sudo mkdir -p /mnt/runtime-apex
@@ -94,7 +95,7 @@ for ap in $apices; do
   fi
 done
 # Fallbacks from the system tree itself (covers images with legacy layout).
-for cand in $(find "$mp" \( -name linker64 -o -name 'libc.so' \) 2>/dev/null); do
+for cand in $(sudo find "$mp" \( -name linker64 -o -name 'libc.so' \) 2>/dev/null || true); do
   case "$cand" in
     *linker64) sudo cp -a "$cand" "$sysroot/system/bin/linker64" ;;
     *libc.so)  sudo cp -a "$(dirname "$cand")/." "$sysroot/system/lib64/" 2>/dev/null || true ;;
