@@ -94,5 +94,5 @@ test -x "$sysroot/system/bin/linker64" || { echo "::error::no linker64 found in 
 test -s "$sysroot/system/lib64/libc.so" || { echo "::error::no libc.so found in system image"; exit 1; }
 
 sudo umount "$mp" 2>/dev/null || true
-ls -la "$sysroot/system/bin" "$sysroot/system/lib64" | head -20
+ls -la "$sysroot/system/bin" "$sysroot/system/lib64" | head -20 || true
 echo "sysroot ready at $sysroot"
