@@ -370,7 +370,7 @@ that run produced no Bun information either.
    `TLS_BADCERT_VERDICT=DNS_UNRESOLVED` is explicitly not counted as a rejection.
    Across the four runs that produced TLS rows, the primary-host probe
    (`api.github.com`, which needs a successful handshake to return 200)
-   succeeded on API 30 4/4, API 34 3/4 and API 35 2/4 - so each API level's R3
+   succeeded on API 30 5/5, API 34 4/5 and API 35 2/5 - so each API level's R3
    rests on fewer runs than this table's single row suggests, and only API 30 is
    consistent.
 8. **The name-resolution failures vary by API level and run, and the reason is
