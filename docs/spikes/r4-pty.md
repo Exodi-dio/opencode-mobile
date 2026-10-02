@@ -13,9 +13,10 @@ Probe source: `native/ptyprobe/main.c`. Log assertions:
 **Repeat run:** **37000707941** (green) re-ran the byte-identical probe on
 freshly created emulators and returned `PTY_VERDICT=AVAILABLE`, all five steps
 `OK`, on all three API levels again - no `FLAKY` marker. The raw logs below are
-from run 36998915751; run 37000707941 differs only in the probe's own PIDs
-(30: `CHILD_PID=1929`, 34: `CHILD_PID=2021`, 35: `CHILD_PID=1879`) and the
-slave/master paths, which the emulator assigns fresh each boot.
+from run 36998915751. A `diff` of the API 34 logs from the two runs shows
+exactly two differing lines, both process ids assigned by the freshly booted
+image: `PID=1562` -> `PID=2016` and `CHILD_PID=1564` -> `CHILD_PID=2021`. Every
+verdict, step result and pty path (`/dev/pts/0`, `/dev/pts/1`) is identical.
 
 ## The entry for `docs/limitations.md`, verbatim
 
@@ -110,16 +111,20 @@ about PTY, and neither is cited as evidence.
 
 1. **Measured in the `shell` SELinux domain, not an app domain.** Every log
    above is `UID=2000 EUID=2000 SELINUX_CTX="u:r:shell:s0"` - the `adb shell`
-   domain, which has explicit `allow shell devpts:chr_file rw_file_perms;`. A
-   packaged app runs in `untrusted_app_*`, which is a different domain with a
-   different rule set. `::warning::` is only emitted for `UNAVAILABLE`, so this
-   caveat has to be read, not skimmed past.
+   domain. `private/shell.te` places `shell` inside the `appdomain` attribute
+   (`app_domain(shell)`, present on `android11-release`, `android15-release` and
+   `main`), and from `refs/heads/android13-release` on, `private/app.te` grants
+   `allow appdomain devpts:chr_file { getattr read write ioctl };` - that is the
+   rule a packaged app would rely on. A packaged app nevertheless runs as its own
+   `untrusted_app_*` domain, and **no run here exercised that domain.** The
+   `::warning::` annotation is only emitted for `UNAVAILABLE`, so this caveat has
+   to be read, not skimmed past.
 2. **x86_64 emulator, not arm64 hardware** (Review Focus #2). Nothing here is an
    arm64 measurement. R4 is a permission question rather than a performance one,
    so the transfer is reasonable - but it is a transfer.
 3. **Not a `jniLibs`-installed binary** (Review Focus #3). The probe ran from
-   `/data/local/tmp`, a world-`radio`-group node, with different SELinux labels
-   and sibling-path resolution than `nativeLibraryDir`.
+   `/data/local/tmp`, with different SELinux labels and sibling-path resolution
+   than the `nativeLibraryDir` the app's payload will live in.
 4. **AOSP policies, not OEM policies.** The emulator runs the AOSP `devpts`
    policy. A vendor that denies `devpts` to apps would change the answer for
    that device only.
@@ -167,9 +172,10 @@ PTY_CHILD_OK
 `script` allocates the pair with `forkpty(3)`, and the child read its own
 controlling terminal back as `/dev/pts/29` via `readlink("/proc/self/fd/0")` -
 so the fd really is a tty and really is the pty slave. Meanwhile `ls /dev/pts`
-is denied to the same domain, so the denial is on the `devpts` *directory*
-while `/dev/ptmx` (`ptmx_device`) and the slave device node stay openable: an
-app does not need to enumerate `/dev/pts` to get a pty.
+is denied to the same domain, while the directory's own mode is
+`drwxr-xr-x root:root`, which DAC would have permitted. The denial is therefore
+on the `devpts` *directory* search access, not on the slave device node: an app
+does not need to enumerate `/dev/pts` to get a pty.
 
 This is consistent with AOSP's own policy, which from `refs/heads/android13-release`
 onwards (`system/sepolicy`, `private/app.te`) contains:
@@ -183,7 +189,7 @@ with, on `refs/heads/main`'s `private/domain.te`:
 `neverallowxperm * devpts:chr_file ioctl TIOCSTI;`. The
 same `appdomain devpts` line is **absent** from `private/app.te` on
 `refs/heads/android11-release` and `android12-release` (both files fetched
-successfully; 2 069 and 4 218 bytes, zero `devpts` matches), so where API 30
+successfully; 2069 and 4218 bytes, zero `devpts` matches), so where API 30
 apps get their `devpts` access was not established. **The API 30 app-domain
 path therefore rests on the emulator run plus this policy reading, not on a
 direct app-domain measurement.**
@@ -194,5 +200,5 @@ direct app-domain measurement.**
   or to run `TIOCSPTLCK` in `untrusted_app_*` on a real device. That is the
   one measurement M0 structurally cannot make, because M0 ships no APK.
 - An OEM policy that denies `devpts` to apps.
-- Task 5's second run disagreeing with run 36998915751 (would be recorded as
-  `FLAKY`, not smoothed over).
+- A later run disagreeing with runs 36998915751 and 37000707941 (Task 5's
+  reproducibility pass would record that as `FLAKY`, not smooth it over).
