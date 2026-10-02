@@ -83,23 +83,31 @@ baseline slot, and `item.abi`, with `.filter(Boolean)` at line 154 dropping the
 (line 177) is `name.replace(pkg.name, "bun")`, i.e. `bun-linux-arm64-android` and
 `bun-linux-x64-android` — exactly the strings Bun 1.4.2's parser accepts.
 
+One consequence falls out for free and is worth knowing: `dist/<name>/package.json` (line
+232) will carry `"libc": ["android"]`, which npm does not recognise. That file exists to
+drive `npm install` platform selection on the release path; we never publish to npm, so
+it is inert here.
+
 ### Decision, not fact: `"android"` → `"glibc"` for `OPENCODE_LIBC`
 
 `OPENCODE_LIBC` (line 199) previously passed `item.abi` through verbatim. With
 `abi: "android"` that would bake the literal string `"android"` into the binary, so we
 map it to `"glibc"` instead and opencode's libc-dependent code paths take the branch they
-already have for glibc. The consumer is
+already have for glibc. The only consumer of the constant in this repo is
 `packages/core/src/filesystem/watcher.ts:28-31`, which builds a
 `@parcel/watcher-${platform}-${arch}-${libc}` require string; on Android the platform
 segment is `android` and no such prebuild exists either way, so the `try/catch` around it
 degrades to "no native watcher". The value is not load-bearing for correctness here — but
-`"android"` in a variable named `*_LIBC` would be a lie that future readers trip over,
-and OpenTUI's `OPENTUI_LIBC` has the same two-valued contract.
+`"android"` in a variable named `*_LIBC` would be a lie that future readers trip over, and
+the adjacent `OPENTUI_LIBC` define has the identical shape.
 
-**This is a choice, not a verified fact.** Nothing has run this binary on Android yet.
-If Task 4 finds native process spawning misbehaving, the fallback is to build with
-`abi: "musl"` instead and re-run Task 4's assertions under that pin. The patch is
-structured so that change is a two-line edit to `allTargets`.
+**This is a choice, not a verified fact.** Nothing has run this binary on Android yet, and
+`@opentui/core`'s own use of `OPENTUI_LIBC` was not read at this pin (it is a published
+dependency, not vendored source), so its reaction to `"glibc"` on a Bionic device is
+assumed from the glibc branch being the non-musl default. If Task 4 finds native process
+spawning misbehaving, the fallback is to build with `abi: "musl"` instead and re-run
+Task 4's assertions under that pin. The patch is structured so that change is a two-line
+edit to `allTargets`.
 
 `process.env.OPENTUI_LIBC` (line 200) had the identical bug and got the identical fix
 via the same new `libc` local. That is one edit beyond the brief's list; leaving it would
@@ -144,26 +152,27 @@ targets come out of one `build.ts` invocation, each in its own `dist/` subdirect
 | | arm64 | x64 |
 | --- | --- | --- |
 | path | `dist/opencode-linux-arm64-android/bin/opencode` | `dist/opencode-linux-x64-android/bin/opencode` |
-| size | ~158 MiB | ~160 MiB |
+| size | 165,279,488 B (157.6 MiB) | 167,923,744 B (160.1 MiB) |
 | `file` | `ELF 64-bit LSB pie executable, ARM aarch64, ... dynamically linked` | `ELF 64-bit LSB pie executable, x86-64, ... dynamically linked` |
 | `PT_INTERP` | `/system/bin/linker64` | `/system/bin/linker64` |
-| `DT_NEEDED` | `libc.so`, `libm.so`, `libdl.so` | same |
-| `PT_LOAD` align | `0x4000` (R E), `0x10000` (RW) | same |
+| `DT_NEEDED` | `libc.so`, `libm.so`, `libdl.so` | `libc.so`, `libm.so`, `libdl.so` |
+| `PT_LOAD` align | `0x4000` (R E), `0x10000` (RW) | `0x4000` (R E), `0x4000` (RW) |
 
 Two things worth writing down because they are not what the brief predicted:
 
 - **The `DT_NEEDED` list is Bionic, and it is minimal.** No `libc.so.6`, no
   `ld-linux-*`; the interpreter is Android's own `/system/bin/linker64`. This matches
   what oven-sh/bun#29675 reported (`NEEDED = libc/libm/liblog/libdl`).
-- **The text segment is `0x4000` but the data segment is `0x10000`.** The M0 brief asked
-  the assertion to check for `Align` of exactly `0x4000` on `LOAD` segments. `0x10000`
-  is 64 KB, i.e. four 16 KB pages — strictly *stronger* than the 16 KB
-  `max-page-size` Android 15+ requires, and satisfying it. The assertion therefore
-  checks what the requirement actually is: every `LOAD` segment's `p_align` is a
-  positive multiple of `0x4000`. It still fails hard on `0x1000` (4 KB) and `0x2000`
-  (8 KB), which are the alignments that actually break on a 16 KB device. Checked for
-  equality to `0x4000` instead, the assertion would have rejected a better-aligned
-  binary, which is a bug in the assertion, not in the artifact.
+- **The arm64 data segment is `0x10000`, not `0x4000`.** The M0 brief asked the assertion
+  to check for `Align` of exactly `0x4000` on `LOAD` segments. x64 happens to emit
+  `0x4000` for both, but arm64 emits `0x4000` for the R E segment and `0x10000` (64 KB =
+  four 16 KB pages) for the RW segment. 64 KB is *stronger* than the 16 KB
+  `max-page-size` Android 15+ requires, and satisfies it. The assertion therefore checks
+  what the requirement actually is: every `LOAD` segment's `p_align` is a positive
+  multiple of `0x4000`. It still fails hard on `0x1000` (4 KB) and `0x2000` (8 KB),
+  which are the alignments that actually break on a 16 KB device. Checked for equality to
+  `0x4000` instead, the assertion would have rejected a better-aligned binary — a bug in
+  the assertion, not in the artifact.
 
 Nothing here has been run on a device. Every claim above is from `file`/`readelf` on the
 CI runner.
@@ -220,8 +229,12 @@ installation, and libc/channel semantics rather than guesswork):
 
 - `package.json` (repo root) — `packageManager: "bun@1.3.14"`, `workspaces`,
   `postinstall`, `patchedDependencies`.
-- `packages/opencode/package.json` — `"build": "bun run script/build.ts"`; this is where
-  the invocation used in CI comes from.
+- `packages/opencode/package.json` — `"build": "bun run script/build.ts"`. CI invokes the
+  script directly as `./packages/opencode/script/build.ts` from the repo root, which is
+  what upstream's own `.github/workflows/publish.yml` does (the file has a
+  `#!/usr/bin/env bun` shebang and is committed mode 755) and is equivalent to
+  `bun run script/build.ts` from `packages/opencode`. The script `process.chdir`s itself
+  into `packages/opencode`, so both forms produce `dist/` in the same place.
 - `packages/script/src/index.ts` (77 lines) — the Bun version gate and how
   `Script.version` / `Script.channel` are derived.
 - `packages/core/src/filesystem/watcher.ts` — 140 lines; the `OPENCODE_LIBC` consumer at

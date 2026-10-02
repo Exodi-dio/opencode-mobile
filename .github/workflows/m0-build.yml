@@ -89,7 +89,6 @@ jobs:
         run: bun install
 
       - name: Build android binaries
-        id: build
         working-directory: ${{ steps.upstream.outputs.path }}
         run: |
           ./packages/opencode/script/build.ts
