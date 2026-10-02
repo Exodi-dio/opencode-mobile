@@ -1,0 +1,14 @@
+name: t6
+on:
+  push:
+    branches:
+      - m0-t1
+env:
+  FOO: bar
+jobs:
+  a:
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          BAZ: ${{ env.FOO }}
+        run: echo "baz=$BAZ"
