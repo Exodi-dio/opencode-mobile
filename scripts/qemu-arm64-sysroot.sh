@@ -84,7 +84,7 @@ rt2=$(sudo find "$mp" -maxdepth 6 -path '*com.android.runtime*/bin/linker64' 2>/
 # Fallbacks from the system tree itself (covers images with legacy layout).
 for cand in $(sudo find "$mp" \( -name linker64 -o -name 'libc.so' \) 2>/dev/null || true); do
   case "$cand" in
-    *linker64) sudo cp -rL "$cand" "$sysroot/system/bin/linker64" ;;
+    *linker64) sudo cp -rL "$cand" "$sysroot/system/bin/linker64" || true ;;
     *libc.so)  sudo cp -rL "$(dirname "$cand")/." "$sysroot/system/lib64/" 2>/dev/null || true ;;
   esac
 done
