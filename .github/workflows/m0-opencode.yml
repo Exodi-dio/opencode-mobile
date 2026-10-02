@@ -54,9 +54,13 @@ jobs:
 
           cat > "$t/healthy.log" <<'EOF'
           OPENCODE_PROBE=1 API_LEVEL=34 SDK="34" ABI="x86_64" ANDROID_RELEASE="14" BIN_SHA256=deadbeef
-          PID=1234 SERVER_LOG_LINES=20 TIME_TO_HEALTHY_MS=1823
+          PID=1234
+          SERVER_LOG_LINES=20
+          TIME_TO_HEALTHY_MS=1823
           HEALTHY_BODY="{"healthy":true,"version":"1.18.34"}"
-          HEALTHY_AFTER_60S=yes FATAL_SIGNAL=0 R2_FAILURES=1
+          HEALTHY_AFTER_60S=yes
+          FATAL_SIGNAL=0
+          R2_FAILURES=1
           R2[1]="optional\tFailed to load native binding for ripgrep"
           OPENCODE_VERDICT=HEALTHY
           EXIT=0

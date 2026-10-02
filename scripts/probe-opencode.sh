@@ -144,9 +144,13 @@ adb forward --remove tcp:4096 tcp:4096 >/dev/null 2>&1 || true
 abstract() { head -c 200 "$1" | tr '\n' ' '; }
 {
   echo "OPENCODE_PROBE=1 API_LEVEL=$api SDK=\"$sdk\" ABI=\"$abi\" ANDROID_RELEASE=\"$release\" BIN_SHA256=$sha"
-  echo "PID=$pid SERVER_LOG_LINES=$(wc -l < "$serverlog" | tr -d ' ') TIME_TO_HEALTHY_MS=$t_healthy"
+  echo "PID=$pid"
+  echo "SERVER_LOG_LINES=$(wc -l < "$serverlog" | tr -d ' ')"
+  echo "TIME_TO_HEALTHY_MS=$t_healthy"
   echo "HEALTHY_BODY=\"$(echo "$healthy_body" | head -c 160)\""
-  echo "HEALTHY_AFTER_60S=$healthy_60s FATAL_SIGNAL=$fatal_signal R2_FAILURES=$r2count"
+  echo "HEALTHY_AFTER_60S=$healthy_60s"
+  echo "FATAL_SIGNAL=$fatal_signal"
+  echo "R2_FAILURES=$r2count"
   n=0
   while IFS= read -r l; do n=$((n+1)); [ "$n" -le 8 ] && echo "R2[$n]=\"$l\""; done < "$r2list"
   echo "OPENCODE_VERDICT=$verdict"
