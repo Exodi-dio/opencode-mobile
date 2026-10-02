@@ -69,31 +69,18 @@ sudo find "$mp/system/bin" "$mp/system/apex" -maxdepth 5 -name 'linker64*' 2>/de
 # libc in com.android.runtime.apex; older images have them in system/bin64.
 sysroot="$out/sysroot"
 mkdir -p "$sysroot/system/bin" "$sysroot/system/lib64"
-apices=$(sudo find "$mp" -path '*com.android.runtime*.apex' 2>/dev/null || true)
-echo "runtime apexes: $apices"
-for ap in $apices; do
-  sudo mkdir -p /mnt/runtime-apex
-  if sudo mount -o loop,ro "$ap" /mnt/runtime-apex 2>/dev/null; then
-    echo "apex mounted directly"
-    sudo mkdir -p "$sysroot/apex/com.android.runtime"
-    sudo cp -a /mnt/runtime-apex/. "$sysroot/apex/com.android.runtime/"
-    sudo cp -a /mnt/runtime-apex/bin/. "$sysroot/system/bin/" || true
-    sudo cp -a /mnt/runtime-apex/lib64/. "$sysroot/system/lib64/" || true
-    sudo umount /mnt/runtime-apex
-  else
-    sudo apt-get install -y binwalk && sudo binwalk -Me "$ap" -C "$work/apex" || {
-      echo "::error::cannot extract $ap (harness fault)"; exit 1; }
-    rootdir=$(find "$work/apex" -maxdepth 4 -type d -name bin | head -1 | xargs -r dirname || true)
-    if [ -n "$rootdir" ]; then
-      sudo mkdir -p "$sysroot/apex/com.android.runtime"
-      sudo cp -a "$rootdir/." "$sysroot/apex/com.android.runtime/"
-      sudo cp -a "$rootdir/bin/." "$sysroot/system/bin/" || true
-      sudo cp -a "$rootdir/lib64/." "$sysroot/system/lib64/" || true
-    fi
-    sudo umount /mnt/runtime-apex 2>/dev/null || true
-    continue
-  fi
-done
+# Android 13 keeps com.android.runtime as a pre-extracted directory under
+# /system/apex/; both its bin/linker64 and lib64/ ship inside it.
+rt="$mp/system/apex/com.android.runtime"
+if [ -d "$rt" ]; then
+  echo "runtime dir: $rt"
+  sudo mkdir -p "$sysroot/apex/com.android.runtime"
+  sudo cp -a "$rt/." "$sysroot/apex/com.android.runtime/"
+  sudo cp -a "$rt/bin/." "$sysroot/system/bin/" || true
+  sudo cp -a "$rt/lib64/." "$sysroot/system/lib64/" || true
+fi
+rt2=$(sudo find "$mp" -maxdepth 6 -path '*com.android.runtime*/bin/linker64' 2>/dev/null | head -1 || true)
+[ -n "$rt2" ] && echo "runtime linker64: $rt2"
 # Fallbacks from the system tree itself (covers images with legacy layout).
 for cand in $(sudo find "$mp" \( -name linker64 -o -name 'libc.so' \) 2>/dev/null || true); do
   case "$cand" in
