@@ -10,6 +10,13 @@ in the repo should summarise R4 independently.
 Probe source: `native/ptyprobe/main.c`. Log assertions:
 `scripts/assert-pty-log.sh`.
 
+**Repeat run:** **37000707941** (green) re-ran the byte-identical probe on
+freshly created emulators and returned `PTY_VERDICT=AVAILABLE`, all five steps
+`OK`, on all three API levels again - no `FLAKY` marker. The raw logs below are
+from run 36998915751; run 37000707941 differs only in the probe's own PIDs
+(30: `CHILD_PID=1929`, 34: `CHILD_PID=2021`, 35: `CHILD_PID=1879`) and the
+slave/master paths, which the emulator assigns fresh each boot.
+
 ## The entry for `docs/limitations.md`, verbatim
 
 ```
@@ -125,8 +132,16 @@ about PTY, and neither is cited as evidence.
    AOSP policy (`neverallowxperm * devpts:chr_file ioctl TIOCSTI;`) and was
    deliberately not probed, because a failure there is a known fact, not a
    finding.
-6. **One run per API level.** No second run, so nothing here is claimed to be
-   reproducible. Task 5's reproducibility pass is what would establish that.
+6. **Step 2's `grantpt` half is vacuous on Bionic, by implementation.**
+   `libc/bionic/pty.cpp` is literally `int grantpt(int) { return 0; }` - it
+   cannot fail. The part of step 2 that carries evidence is `unlockpt`
+   (`ioctl TIOCSPTLCK`), and that ioctl is what unlocks the slave. A green
+   `STEP=2` therefore means "TIOCSPTLCK succeeded", not "both calls were
+   meaningfully exercised". `unlockpt` alone is also enough to invalidate a PTY
+   result: without it the slave stays locked and `open(ptsname)` fails.
+7. **Two runs, identical verdict.** Runs 36998915751 and 37000707941 agree on
+   all three API levels, so R4 is not flaky. Task 5's reproducibility pass is
+   still the formal check for the spike as a whole.
 
 ## Supplementary observation (NOT part of the recorded verdict)
 
