@@ -25,10 +25,17 @@ env:
   # Android binaries, each into its own dist/ subdirectory. A matrix over the
   # two architectures would repeat identical work.
   OPENCODE_TARGET_FILTER: opencode-linux-arm64-android,opencode-linux-x64-android
-  # packages/script enforces ^1.3.14 from upstream's packageManager field, which
-  # 1.4.2 satisfies. Pin the version so the binary is not stamped with the
-  # placeholder that a detached-HEAD `git branch` would produce.
-  OPENCODE_VERSION: "1.18.34"
+  # Stamped into the binary verbatim, twice: the OPENCODE_VERSION define
+  # (build.ts:194) and the `--user-agent=opencode/<version>` execArgv
+  # (build.ts:179). packages/script/src/index.ts passes this env var through
+  # unchanged as Script.version.
+  #
+  # It is deliberately NOT the bare `1.18.34`. The pin is dev HEAD, which has
+  # diverged from the v1.18.34 tag (11 ahead, 1 behind) -- see UPSTREAM.md --
+  # so `1.18.34` alone would stamp the binary with a tag it is not. The
+  # `+dev.1ddb087` is SemVer build metadata, which SemVer precedence ignores,
+  # so this still compares as 1.18.34 in Installation.getReleaseType.
+  OPENCODE_VERSION: "1.18.34+dev.1ddb087"
   OPENCODE_CHANNEL: latest
 
 jobs:
@@ -37,11 +44,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Fetch upstream at ${{ env.UPSTREAM_SHA }}
         id: upstream
-        run: echo "path=$(./scripts/fetch-upstream.sh "$UPSTREAM_SHA")" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          path=$(./scripts/fetch-upstream.sh "$UPSTREAM_SHA")
+          echo "path=$path" >> "$GITHUB_OUTPUT"
 
       - name: Assert the checkout is the pinned commit
         working-directory: ${{ steps.upstream.outputs.path }}
@@ -65,20 +75,23 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # node-gyp (invoked by native install scripts) needs Node >= 22.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
       - name: Fetch upstream at ${{ env.UPSTREAM_SHA }}
         id: upstream
-        run: echo "path=$(./scripts/fetch-upstream.sh "$UPSTREAM_SHA")" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          path=$(./scripts/fetch-upstream.sh "$UPSTREAM_SHA")
+          echo "path=$path" >> "$GITHUB_OUTPUT"
 
       - name: Apply android target patch
         working-directory: ${{ steps.upstream.outputs.path }}
@@ -101,8 +114,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          # $3 is the PT_INTERP this architecture must have. Both values were
+          # read off the PT_INTERP in run 36995649155, not assumed: Bionic's
+          # 64-bit linker is /system/bin/linker64 on arm64 and on x86-64 alike.
           check() {
-            bin="$1" machine="$2"
+            bin="$1" machine="$2" interp="$3"
             echo "::group::$machine: $bin"
             ls -l "$bin"
 
@@ -133,7 +149,20 @@ jobs:
             echo "--- readelf -lW ---"
             readelf -lW "$bin" | tee /tmp/phdr.txt
 
-            # 3. Android 15+ 16 KB page-size compatibility: every LOAD segment's p_align
+            # 3. Bionic, not musl. The three checks in step 2 do NOT separate
+            #    the two: a musl-linked executable has no libc.so.6 and no
+            #    ld-linux-*, and musl's shared library is literally named
+            #    libc.so, so it passes all three. PT_INTERP is what separates
+            #    them -- Bionic uses /system/bin/linker64, musl uses
+            #    /lib/ld-musl-<arch>.so.1. readelf prints the interpreter as
+            #    "[Requesting program interpreter: ...]" under `readelf -l`,
+            #    not under `readelf -d`, so this greps /tmp/phdr.txt.
+            if ! grep -q "Requesting program interpreter: $interp" /tmp/phdr.txt; then
+              echo "::error::$machine PT_INTERP is not $interp -- this is not a Bionic-linked executable (a musl build would report /lib/ld-musl-*.so.1)"
+              exit 1
+            fi
+
+            # 4. Android 15+ 16 KB page-size compatibility: every LOAD segment's p_align
             #    must be a positive multiple of 0x4000 (16 KB). Bun emits 0x4000
             #    for the R E text segment and 0x10000 (64 KB) for the RW data
             #    segment; 64 KB is strictly stronger than 16 KB and satisfies the
@@ -145,7 +174,26 @@ jobs:
               exit 1
             fi
             echo "LOAD segment alignments: $aligns"
+
+            # Pin the assumption the extraction above rests on: `readelf -lW`
+            # prints one line per segment header, so $NF on a LOAD line is
+            # p_align. Drop the W and binutils splits every 64-bit header
+            # across two lines, after PhysAddr -- so $NF on the LOAD line
+            # becomes PhysAddr, 0x0000000000000000 for a PIE, which is a
+            # multiple of 0x4000 and would make the loop below a no-op that
+            # passes every alignment. One extracted alignment per LOAD line is
+            # the invariant; the 0x1000 floor inside the loop is what actually
+            # rejects the PhysAddr reading.
+            test "$(grep -c '^[[:space:]]*LOAD' /tmp/phdr.txt)" -eq "$(printf '%s\n' $aligns | grep -c .)" \
+              || { echo "::error::readelf -lW layout not single-line; alignment extraction unreliable"; exit 1; }
+
             for align in $aligns; do
+              # `[` does not evaluate arithmetic, so the hex literal and the
+              # extracted value both have to go through $(( )).
+              if [ $((align)) -lt $((0x1000)) ]; then
+                echo "::error::$machine LOAD segment alignment $align is below 0x1000, which no LOAD segment can have; readelf's column layout must have changed"
+                exit 1
+              fi
               if [ "$align" = "0x0" ] || [ $((align % 0x4000)) -ne 0 ]; then
                 echo "::error::$machine LOAD segment alignment $align is not a positive multiple of 0x4000 (16 KB)"
                 exit 1
@@ -155,28 +203,40 @@ jobs:
             echo "PASS $machine"
           }
 
-          check "$ARM64" aarch64
-          check "$X64" x86-64
+          check "$ARM64" aarch64 /system/bin/linker64
+          check "$X64" x86-64 /system/bin/linker64
 
       - name: Stage artifacts
         env:
+          UPSTREAM: ${{ steps.upstream.outputs.path }}
           SRC: ${{ steps.upstream.outputs.path }}/packages/opencode/dist
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/staging"
           cp -r "$SRC/opencode-linux-arm64-android" "$GITHUB_WORKSPACE/staging/"
           cp -r "$SRC/opencode-linux-x64-android" "$GITHUB_WORKSPACE/staging/"
+          # Attribution travels with the binaries. Upstream's MIT text is its
+          # LICENSE verbatim at the pin; ours states non-affiliation and quotes
+          # the same notice. Without these, a bare `opencode` copied out of the
+          # artifact ships with no licence and no indication of what it is.
+          cp "$UPSTREAM/LICENSE" "$GITHUB_WORKSPACE/staging/upstream-LICENSE"
+          cp "$GITHUB_WORKSPACE/THIRD-PARTY-NOTICES.md" "$GITHUB_WORKSPACE/staging/THIRD-PARTY-NOTICES.md"
           find "$GITHUB_WORKSPACE/staging" -type f | sort
 
-      # One artifact, two paths. upload-artifact stores entries relative to the
-      # least common ancestor (`staging`), so the archive contains exactly
-      # opencode-linux-arm64-android/bin/opencode and
-      # opencode-linux-x64-android/bin/opencode.
-      - uses: actions/upload-artifact@v4
+      # One artifact, both architectures. upload-artifact stores entries
+      # relative to the least common ancestor (`staging`), so the archive
+      # contains exactly:
+      #   opencode-linux-arm64-android/bin/opencode
+      #   opencode-linux-x64-android/bin/opencode
+      #   upstream-LICENSE
+      #   THIRD-PARTY-NOTICES.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: opencode-android-binaries
           path: |
             staging/opencode-linux-arm64-android/bin/opencode
             staging/opencode-linux-x64-android/bin/opencode
+            staging/upstream-LICENSE
+            staging/THIRD-PARTY-NOTICES.md
           retention-days: 14
           if-no-files-found: error

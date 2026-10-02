@@ -12,8 +12,12 @@ how we build it, and every place we deviate from it.
 | Repository | `anomalyco/opencode` |
 | Default branch | `dev` |
 | Pinned commit | `1ddb0873aee50d209d1a8d7f91b89c5daf692d49` |
-| Release | `v1.18.34` (`packages/opencode/package.json` → `"version": "1.18.34"`) |
-| License | MIT |
+| Pin is | `dev` **HEAD** — *not* a release tag |
+| Nearest release tag | `v1.18.34` → `aec0b9a6d8898f68f923aaf08b7306d931fd9d76` (2026-09-30) |
+| Pin vs that tag | **diverged** — 11 commits ahead, 1 behind (merge base `e9f8a210b9e2b1e13d375b84906069886eb3b767`) |
+| Version *string* at the pin | `1.18.34` (`packages/opencode/package.json`) |
+| Version the binary reports | `1.18.34+dev.1ddb087` (see below) |
+| License | MIT — `Copyright (c) 2025 opencode` (`LICENSE` at the pin, 21 lines) |
 | Build Bun version | `1.4.2` |
 
 Every build reads the pin from `.github/workflows/m0-build.yml` → `env.UPSTREAM_SHA`.
@@ -25,6 +29,53 @@ be re-read and the spec amended by hand.
 
 `dev` head was verified to be exactly `1ddb0873aee50d209d1a8d7f91b89c5daf692d49` on
 2026-10-02, before the patch was written.
+
+### The pin is not `v1.18.34`, and this is where that is written down
+
+`1.18.34` is the version *string* in `packages/opencode/package.json` **at** the pin. The
+tag `v1.18.34` points somewhere else — at `aec0b9a`, and the pin has diverged from it
+(11 ahead, 1 behind, merge base `e9f8a210`). Verified against the GitHub compare API on
+2026-10-02: `GET /repos/anomalyco/opencode/compare/aec0b9a6…1ddb0873…` → `status:
+diverged, ahead_by: 11, behind_by: 1`. So a binary reporting `1.18.34` is **not** running
+the code tagged `v1.18.34`, and a tag-to-SHA lookup will not reproduce this build. The
+unmodified sources for it are at the pinned commit and nowhere else.
+
+The M0 brief's wording contributed to this: it named a version (`1.18.34`) where it meant
+a pin, so "pin the upstream commit" and "the version is 1.18.34" read as one fact. They
+are two, and the table above is the only place in this repo that keeps them apart.
+
+### Decision: `OPENCODE_VERSION` is `1.18.34+dev.1ddb087`, not `1.18.34`
+
+The bare `1.18.34` would stamp the binary with a provenance it does not have — the exact
+defect this section exists to prevent, and the one thing in the build that a reader on a
+device can see. Every other input to this workflow is a 40-hex SHA precisely so the
+artifact is traceable; leaving the one human-visible provenance field behind would be
+inconsistent with that.
+
+Where the value goes, both verbatim:
+
+- `OPENCODE_VERSION` define, `packages/opencode/script/build.ts:194` → `OPENCODE_VERSION`
+  global → `InstallationVersion` (`packages/core/src/installation/version.ts:6`) → `--version`.
+- `execArgv` `--user-agent=opencode/${Script.version}`, `build.ts:179`.
+
+`Script.version` is `OPENCODE_VERSION` passed straight through by
+`packages/script/src/index.ts` — no normalisation, no validation.
+
+Why `+dev.1ddb087` and not `-dev.1ddb087`: it is SemVer **build metadata**, which SemVer
+precedence ignores, so the string still compares as `1.18.34` in
+`Installation.getReleaseType` (`packages/opencode/src/installation/index.ts:24-33`, which
+calls `semver.major`/`semver.minor`). A prerelease form would have sorted *below*
+`1.18.34` and was rejected for that.
+
+One behavioural consequence, stated because it is real: `upgrade()` returns early on
+`InstallationVersion === latest` (`packages/opencode/src/cli/upgrade.ts:26`). The bare
+`1.18.34` matched GitHub's latest release and skipped the update path; with build metadata
+it never matches, so the path is always entered. On Android it exits again at
+`if (method === "unknown") return` (`upgrade.ts:41`) — `Installation.method()`
+(`installation/index.ts:174-207`) looks for a global `npm`/`yarn`/`pnpm`/`bun`/`brew`/
+`scoop`/`choco` install of opencode and finds none — so nothing is downloaded or replaced.
+If that ever stops being true, `OPENCODE_DISABLE_AUTOUPDATE=1` (read at
+`packages/core/src/flag/flag.ts:23`) or `"autoupdate": false` in config is the switch.
 
 ## Why Bun 1.4.2
 
@@ -104,10 +155,30 @@ the adjacent `OPENTUI_LIBC` define has the identical shape.
 **This is a choice, not a verified fact.** Nothing has run this binary on Android yet, and
 `@opentui/core`'s own use of `OPENTUI_LIBC` was not read at this pin (it is a published
 dependency, not vendored source), so its reaction to `"glibc"` on a Bionic device is
-assumed from the glibc branch being the non-musl default. If Task 4 finds native process
-spawning misbehaving, the fallback is to build with `abi: "musl"` instead and re-run
-Task 4's assertions under that pin. The patch is structured so that change is a two-line
-edit to `allTargets`.
+assumed from the glibc branch being the non-musl default.
+
+If Task 4 finds native process spawning misbehaving, **the fallback is one line of the
+patch** — the `libc` local, leaving `abi: "android"` in `allTargets` alone:
+
+```diff
+-  const libc = item.abi === "musl" ? "musl" : "glibc"
++  const libc = item.abi === "musl" ? "musl" : item.abi === "android" ? "musl" : "glibc"
+```
+
+The shipped patch keeps `"glibc"`; that `diff` is a contingency to apply later, not a
+description of what is built today.
+
+`abi: "musl"` in `allTargets` is **not** the fallback, even though it is the first thing to
+reach for. It renames the artifacts to `opencode-linux-arm64-musl` /
+`opencode-linux-x64-musl` and the compile targets to `bun-linux-*-musl`, which breaks the
+fixed artifact names Task 4 downloads. The `libc` local only decides which native prebuilds
+opencode *asks for at runtime*, via `OPENCODE_LIBC` and `OPENTUI_LIBC`; it does not change
+how the binary is linked. That separation is also why the fallback can keep both names —
+`Assert android binaries` asserts each architecture's `PT_INTERP`, so a fallback build is
+*proven* Bionic by measurement rather than by a filename or a baked-in define.
+
+Neither fallback arm is verified. Both are recorded so that Task 4 does not have to
+reconstruct the options, and so that whoever picks one reads the caveat above first.
 
 `process.env.OPENTUI_LIBC` (line 200) had the identical bug and got the identical fix
 via the same new `libc` local. That is one edit beyond the brief's list; leaving it would
@@ -158,7 +229,7 @@ targets come out of one `build.ts` invocation, each in its own `dist/` subdirect
 | `DT_NEEDED` | `libc.so`, `libm.so`, `libdl.so` | `libc.so`, `libm.so`, `libdl.so` |
 | `PT_LOAD` align | `0x4000` (R E), `0x10000` (RW) | `0x4000` (R E), `0x4000` (RW) |
 
-Two things worth writing down because they are not what the brief predicted:
+Three things worth writing down because they are not what the brief predicted:
 
 - **The `DT_NEEDED` list is Bionic, and it is minimal.** No `libc.so.6`, no
   `ld-linux-*`; the interpreter is Android's own `/system/bin/linker64`. This matches
@@ -173,6 +244,22 @@ Two things worth writing down because they are not what the brief predicted:
   which are the alignments that actually break on a 16 KB device. Checked for equality to
   `0x4000` instead, the assertion would have rejected a better-aligned binary — a bug in
   the assertion, not in the artifact.
+- **`DT_NEEDED` alone cannot tell Bionic from musl.** musl's shared library is literally
+  named `libc.so` and its loader is `/lib/ld-musl-<arch>.so.1`, so a musl-linked binary
+  passes "no `libc.so.6`, no `ld-linux-*`, has `libc.so`" without a murmur. `PT_INTERP`
+  is the discriminator, and it is now asserted per architecture. `readelf` prints it as
+  `[Requesting program interpreter: …]` under **`readelf -l`**, not `readelf -d` — the
+  assertion reads `/tmp/phdr.txt` accordingly.
+
+### What the assertions assume about `readelf` itself
+
+The alignment assertion extracts `p_align` with `awk '$1 == "LOAD" { print $NF }'`, which
+is only `Align` because `readelf -lW` prints one line per segment header. Drop the `W` and
+binutils splits every 64-bit header across two lines after `PhysAddr`, so `$NF` on the
+`LOAD` line becomes `PhysAddr` — `0x0000000000000000` for a PIE, which *is* a multiple of
+`0x4000` — and the loop would pass every alignment while checking nothing. Two assertions
+now guard that: the extracted-alignment count must equal the count of `LOAD` lines in
+`/tmp/phdr.txt`, and no alignment may be below `0x1000`, which `PhysAddr` could never be.
 
 Nothing here has been run on a device. Every claim above is from `file`/`readelf` on the
 CI runner.
@@ -244,6 +331,29 @@ installation, and libc/channel semantics rather than guesswork):
 - `.github/actions/setup-bun/action.yml` and `.github/workflows/publish.yml` — upstream's
   own build job, which is the model for our `build-android` job.
 
+Read at the same commit when the version-stamping decision above was made, for the same
+reason — what `OPENCODE_VERSION` actually reaches, and whether a non-plain string survives:
+
+- `LICENSE` (21 lines) — `MIT License` / `Copyright (c) 2025 opencode`. Reproduced verbatim
+  in `THIRD-PARTY-NOTICES.md` and shipped as `upstream-LICENSE` inside the artifact.
+- `packages/opencode/package.json` — re-read: `"version": "1.18.34"` at the pin, which is
+  the whole reason the version string and the tag are not the same thing.
+- `packages/opencode/script/build.ts:194` — `OPENCODE_VERSION: `'${Script.version}'``, the
+  define; and `:179` — the `--user-agent=opencode/${Script.version}` execArgv.
+- `packages/script/src/index.ts` — re-read in full: `Script.version` is `OPENCODE_VERSION`
+  returned verbatim, with no validation of its shape. The only use of it there is a
+  `startsWith("0.0.0-")` channel probe.
+- `packages/core/src/installation/version.ts` (8 lines) — `InstallationVersion` is that
+  string, or `"local"`.
+- `packages/opencode/src/cli/upgrade.ts` (53 lines) — read in full; the
+  `InstallationVersion === latest` short-circuit, and the `autoupdate` gate before it.
+- `packages/opencode/src/installation/index.ts` (336 lines) — 24–33 `getReleaseType`
+  (`semver.major`/`semver.minor`, the reason build metadata is safe), 174–207 `method()`,
+  208–264 `latest()`, 265+ `upgrade()`.
+- `packages/core/src/config.ts:42` — `autoupdate` is `Boolean | "notify"`, optional, with
+  no default; so the default configuration takes the update path rather than the notify one.
+- `packages/core/src/flag/flag.ts:23` — `OPENCODE_DISABLE_AUTOUPDATE`, the env kill switch.
+
 And, at tag `bun-v1.4.2` of `oven-sh/bun` rather than at the opencode pin:
 
 - `src/options_types/compile_target.rs` (466 lines) — lines 40–46 (host libc detection),
@@ -256,7 +366,7 @@ line range, it was not read, and it does not get relied on.
 ## CI-only scripts
 
 `scripts/fetch-upstream.sh` clones the whole opencode monorepo. It refuses to run unless
-`$CI` is exactly `true`, so an accidental local invocation fails in one line instead of
+`CI` is exactly `true`, so an accidental local invocation fails in one line instead of
 exhausting a memory-constrained device. Same rule for any future script in `scripts/` that
 clones or installs.
 
@@ -267,7 +377,48 @@ Two deliberate choices in that script:
   for a different commit. `--no-checkout` avoids paying for two trees.
 - Progress goes to stderr and only the checkout path goes to stdout, so
   `path=$(./scripts/fetch-upstream.sh "$SHA")` in a workflow `run:` block captures the
-  path and nothing else.
+  path and nothing else. That assignment is standalone on purpose. Written as
+  `echo "path=$(...)"` it would swallow the script's exit status — `bash -e` reports the
+  status of `echo`, which is 0 — so a refused clone would leave `path` empty, go green, and
+  the next step's `working-directory:` would silently fall back to `$GITHUB_WORKSPACE` and
+  fail somewhere else entirely.
+
+## Everything the workflow executes is pinned
+
+Every executable input to the build is a 40-hex SHA: the upstream commit, Bun `1.4.2`, and
+the four actions.
+
+| Action | SHA | Tag it stands for |
+| --- | --- | --- |
+| `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` | `v4.4.0` |
+| `actions/setup-node` | `49933ea5288caeca8642d1e84afbd3f7d6820020` | `v4.4.0` |
+| `oven-sh/setup-bun` | `0c5077e51419868618aeaa5fe8019c62421857d6` | `v2.2.0` |
+| `actions/upload-artifact` | `ea165f8d65b6e75b540449e92b4886f43607fa02` | `v4.6.2` |
+
+These are the commits the floating `@v4` / `@v4` / `@v2` / `@v4` tags resolved to on
+2026-10-02, so pinning them changed *which code runs* not at all — it only stopped the tags
+from moving underneath us afterwards. Upstream opencode's own CI pins actions to SHAs for
+the same reason.
+
+Newer majors of all four exist (checkout `v7`, setup-node `v7`, upload-artifact `v7`). They
+were deliberately not adopted here: it is a behaviour change, not a supply-chain fix, and it
+would invalidate the green run the evidence table above is measured from.
+
+## What ships in the artifact
+
+`opencode-android-binaries` contains exactly four entries, relative to `staging`:
+
+```
+opencode-linux-arm64-android/bin/opencode
+opencode-linux-x64-android/bin/opencode
+upstream-LICENSE
+THIRD-PARTY-NOTICES.md
+```
+
+The two binary paths are fixed and Task 4 downloads exactly those. The other two are
+attribution: upstream's MIT notice verbatim from the pinned checkout, and this project's
+non-affiliation statement. They exist because the alternative is shipping a 160 MB
+executable whose only licence text is a URL in a source file nobody will see.
 
 ## Reproducing a build locally
 
