@@ -1,0 +1,23 @@
+name: t1
+on:
+  push:
+    branches:
+      - m0-t1
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: t1-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+env:
+  UPSTREAM_REPO: anomalyco/opencode
+  UPSTREAM_SHA: 1ddb0873aee50d209d1a8d7f91b89c5daf692d49
+  UPSTREAM_VERSION: 1.18.34
+  BUN_VERSION: 1.4.2
+  TARGET_FILTER: opencode-linux-arm64-android,opencode-linux-x64-android
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo $UPSTREAM_SHA $BUN_VERSION

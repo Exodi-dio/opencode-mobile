@@ -1,0 +1,29 @@
+name: t2
+on:
+  push:
+    branches:
+      - m0-t1
+jobs:
+  patch-verify:
+    name: patch-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch upstream at 1ddb0873
+        id: upstream
+        run: echo "path=$(./scripts/fetch-upstream.sh "1ddb0873aee50d209d1a8d7f91b89c5daf692d49")" >> "$GITHUB_OUTPUT"
+      - name: Assert the checkout is the pinned commit
+        working-directory: ${{ steps.upstream.outputs.path }}
+        run: |
+          actual=$(git rev-parse HEAD)
+          echo "checked out $actual"
+          if [ "$actual" != "1ddb0873aee50d209d1a8d7f91b89c5daf692d49" ]; then
+            echo "::error::fetched $actual"
+            exit 1
+          fi
+      - name: git apply --check
+        working-directory: ${{ steps.upstream.outputs.path }}
+        run: |
+          git apply --check --verbose "$GITHUB_WORKSPACE/patches/opencode-android-target.patch"
+          echo "patch applies cleanly"
