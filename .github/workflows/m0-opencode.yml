@@ -184,7 +184,7 @@ jobs:
                 chmod*) : ;;
                 "kill -0 "*) read -r _ _ pid <<< "$2"; kill -0 "$pid" 2>/dev/null || exit 1 ;;
                 "kill "*) read -r _ pid <<< "$2"; kill "$pid" 2>/dev/null || true ;;
-                sh*)
+                sh* | *sh\ -c*)
                   pid=$(nohup "$FAKE_SERVER" >/tmp/fake-server.log 2>&1 & echo $!)
                   echo "$pid" ;;
                 *) : ;;

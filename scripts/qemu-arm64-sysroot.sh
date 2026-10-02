@@ -36,7 +36,7 @@ print("sha256 ok")
 EOF
 
 unzip -q -o "$zip" -d "$work/zip"
-img=$(find "$work/zip" -name 'system.img' | head -1)
+img=$(find "$work/zip" -name 'system.img' | head -1 || true)
 [ -n "$img" ] || { echo "::error::no system.img in waydroid zip"; exit 1; }
 
 # Waydroid images are normally raw ext4; convert android-sparse if needed.
@@ -53,7 +53,7 @@ if ! sudo mount -o loop,ro "$raw" /mnt/sysroot-img 2>/dev/null; then
   # The zip may carry a verity/erofs payload; carve with binwalk.
   command -v binwalk >/dev/null || sudo apt-get install -y binwalk
   sudo binwalk -Me "$raw" -C "$work/carve"
-  ext=$(find "$work/carve" -name '*.img' | head -1)
+  ext=$(find "$work/carve" -name '*.img' | head -1 || true)
   [ -n "$ext" ] || { echo "::error::cannot mount or carve system.img"; exit 1; }
   sudo mount -o loop,ro "$ext" /mnt/sysroot-img
 fi
@@ -65,7 +65,7 @@ echo "mounted at $mp"; ls "$mp" > /dev/null || true; ls "$mp" | head -20 || true
 # libc in com.android.runtime.apex; older images have them in system/bin64.
 sysroot="$out/sysroot"
 mkdir -p "$sysroot/system/bin" "$sysroot/system/lib64"
-apices=$(find "$mp" -path '*com.android.runtime*.apex' 2>/dev/null)
+apices=$(find "$mp" -path '*com.android.runtime*.apex' 2>/dev/null || true)
 echo "runtime apexes: $apices"
 for ap in $apices; do
   sudo mkdir -p /mnt/runtime-apex
@@ -79,7 +79,7 @@ for ap in $apices; do
   else
     sudo apt-get install -y binwalk && sudo binwalk -Me "$ap" -C "$work/apex" || {
       echo "::error::cannot extract $ap (harness fault)"; exit 1; }
-    rootdir=$(find "$work/apex" -maxdepth 4 -type d -name bin | head -1 | xargs -r dirname)
+    rootdir=$(find "$work/apex" -maxdepth 4 -type d -name bin | head -1 | xargs -r dirname || true)
     if [ -n "$rootdir" ]; then
       sudo mkdir -p "$sysroot/apex/com.android.runtime"
       sudo cp -a "$rootdir/." "$sysroot/apex/com.android.runtime/"

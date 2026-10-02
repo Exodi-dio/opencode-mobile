@@ -51,7 +51,7 @@ adb push "$bin" /data/local/tmp/opencode >/dev/null
 adb shell chmod 755 /data/local/tmp/opencode
 
 # Boot the server detached so it survives adb hangups.
-pid=$(adb shell "sh -c 'nohup /data/local/tmp/opencode serve --port 4096 --hostname 127.0.0.1 > /data/local/tmp/opencode-server.log 2>&1 < /dev/null & echo \$!'" | tr -d '\r' | tail -1)
+pid=$(adb shell "HOME=/data/local/tmp TMPDIR=/data/local/tmp XDG_CONFIG_HOME=/data/local/tmp/.config XDG_CACHE_HOME=/data/local/tmp/.cache XDG_DATA_HOME=/data/local/tmp/.local/share sh -c 'nohup /data/local/tmp/opencode serve --port 4096 --hostname 127.0.0.1 > /data/local/tmp/opencode-server.log 2>&1 < /dev/null & echo \$!'" | tr -d '\r' | tail -1)
 
 adb forward tcp:4096 tcp:4096
 
