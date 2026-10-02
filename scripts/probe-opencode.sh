@@ -34,9 +34,9 @@ r2list="$out/r2-native-$api.txt"
 
 # Environment facts. SDK comes from the device, API_LEVEL from the matrix;
 # assert-opencode-log.sh cross-checks them, so record both faithfully.
-sdk=$(adb shell getprop ro.build.version.sdk | tr -d '\r')
-release=$(adb shell getprop ro.build.version.release | tr -d '\r')
-abi=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')
+sdk=$(adb shell "getprop ro.build.version.sdk" | tr -d '\r')
+release=$(adb shell "getprop ro.build.version.release" | tr -d '\r')
+abi=$(adb shell "getprop ro.product.cpu.abi" | tr -d '\r')
 
 if [ "$sdk" != "$api" ]; then
   { echo "OPENCODE_PROBE=1 API_LEVEL=$api SDK=\"$sdk\" ABI=\"$abi\" ANDROID_RELEASE=\"$release\" BIN_SHA256=$sha"

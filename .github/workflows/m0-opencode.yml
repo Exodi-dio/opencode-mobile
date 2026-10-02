@@ -174,10 +174,12 @@ jobs:
             logcat) cat /tmp/fake-logcat.txt 2>/dev/null || true ;;
             shell)
               case "$2" in
-                getprop*) case "$2" in
-                    *ro.build.version.sdk*) echo "${STUB_SDK:-34}" ;;
-                    *ro.build.version.release*) echo "${STUB_RELEASE:-14}" ;;
-                    *ro.product.cpu.abi*) echo "${STUB_ABI:-x86_64}" ;;
+                getprop*)
+                  prop="${2#getprop }"
+                  case "$prop" in
+                    ro.build.version.sdk) echo "${STUB_SDK:-34}" ;;
+                    ro.build.version.release) echo "${STUB_RELEASE:-14}" ;;
+                    ro.product.cpu.abi) echo "${STUB_ABI:-x86_64}" ;;
                   esac ;;
                 chmod*) : ;;
                 "kill -0 "*) read -r _ _ pid <<< "$2"; kill -0 "$pid" 2>/dev/null || exit 1 ;;
@@ -250,9 +252,7 @@ jobs:
             set -e
             pkill -f 'fake-' || true
             sleep 1
-            echo "probe rc=$rc"
-            cat out/probe-stderr.txt
-            return 0
+            return $rc
           }
 
           cp out/fake-healthy.py out/fakeopencode
@@ -260,7 +260,7 @@ jobs:
 
           # 1. Healthy path
           run_probe out/fake-healthy.py out/fakeopencode
-          echo "== leg1 log =="; cat out/opencode-34.log
+          cat out/opencode-34.log
           bash scripts/assert-opencode-log.sh out/opencode-34.log 34 out/opencode-server-34.log
           grep -qE 'OPENCODE_VERDICT=HEALTHY' out/opencode-34.log || { echo "::error::stub healthy server did not yield HEALTHY"; cat out/probe-stderr.txt; exit 1; }
           grep -qE 'TIME_TO_HEALTHY_MS=[0-9]+' out/opencode-34.log || { echo "::error::no measured time to healthy"; exit 1; }
