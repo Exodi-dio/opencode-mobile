@@ -1,0 +1,179 @@
+name: m0-build
+
+on:
+  push:
+    branches:
+      - main
+      - m0-t1
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: m0-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: anomalyco/opencode
+  UPSTREAM_SHA: 1ddb0873aee50d209d1a8d7f91b89c5daf692d49
+  UPSTREAM_VERSION: 1.18.34
+  # See UPSTREAM.md. Bun 1.4.2 is the first release whose compile target
+  # parser accepts `bun-linux-{arm64,x64}-android`.
+  BUN_VERSION: 1.4.2
+  TARGET_FILTER: opencode-linux-arm64-android,opencode-linux-x64-android
+
+jobs:
+  patch-verify:
+    name: patch-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch upstream at ${{ env.UPSTREAM_SHA }}
+        id: upstream
+        run: echo "path=$(./scripts/fetch-upstream.sh "$UPSTREAM_SHA")" >> "$GITHUB_OUTPUT"
+
+      - name: Assert the checkout is the pinned commit
+        working-directory: ${{ steps.upstream.outputs.path }}
+        run: |
+          actual=$(git rev-parse HEAD)
+          echo "checked out $actual"
+          if [ "$actual" != "$UPSTREAM_SHA" ]; then
+            echo "::error::fetched $actual but UPSTREAM_SHA is $UPSTREAM_SHA"
+            exit 1
+          fi
+
+      - name: git apply --check
+        working-directory: ${{ steps.upstream.outputs.path }}
+        run: |
+          git apply --check --verbose "$GITHUB_WORKSPACE/patches/opencode-android-target.patch"
+          echo "patch applies cleanly to $UPSTREAM_SHA"
+
+  build-android:
+    name: build-android
+    needs: patch-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      # Consumed by the patch's target filter: one build.ts invocation emits
+      # both Android binaries, each into its own dist/ subdirectory. A matrix
+      # over the two architectures would repeat identical work.
+      OPENCODE_TARGET_FILTER: ${{ env.TARGET_FILTER }}
+      # packages/script reads packageManager ("bun@1.3.14") and enforces ^1.3.14;
+      # 1.4.2 satisfies that. Pin OPENCODE_VERSION so the binary is not stamped
+      # with a placeholder version derived from an empty `git branch`.
+      OPENCODE_VERSION: ${{ env.UPSTREAM_VERSION }}
+      OPENCODE_CHANNEL: latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # node-gyp (invoked by native install scripts) needs Node >= 22.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Fetch upstream at ${{ env.UPSTREAM_SHA }}
+        id: upstream
+        run: echo "path=$(./scripts/fetch-upstream.sh "$UPSTREAM_SHA")" >> "$GITHUB_OUTPUT"
+
+      - name: Apply android target patch
+        working-directory: ${{ steps.upstream.outputs.path }}
+        run: git apply "$GITHUB_WORKSPACE/patches/opencode-android-target.patch"
+
+      - name: bun install
+        working-directory: ${{ steps.upstream.outputs.path }}
+        run: bun install
+
+      - name: Build android binaries
+        id: build
+        working-directory: ${{ steps.upstream.outputs.path }}
+        run: |
+          ./packages/opencode/script/build.ts
+          ls -la packages/opencode/dist
+
+      - name: Assert android binaries
+        env:
+          ARM64: ${{ steps.upstream.outputs.path }}/packages/opencode/dist/opencode-linux-arm64-android/bin/opencode
+          X64: ${{ steps.upstream.outputs.path }}/packages/opencode/dist/opencode-linux-x64-android/bin/opencode
+        run: |
+          set -euo pipefail
+
+          check() {
+            bin="$1" machine="$2"
+            echo "::group::$machine: $bin"
+            ls -l "$bin"
+
+            # 1. exists and is non-empty
+            test -f "$bin"
+            test -s "$bin"
+
+            echo "--- file ---"
+            file -b "$bin" | tee /tmp/file.txt
+            grep -q 'ELF 64-bit LSB' /tmp/file.txt
+            grep -qi "$machine" /tmp/file.txt
+
+            echo "--- readelf -d ---"
+            readelf -d "$bin" | tee /tmp/dyn.txt
+
+            # 2. Bionic linkage, not glibc: no libc.so.6, no glibc loader,
+            #    and bionic's own soname present.
+            if grep -q 'libc\.so\.6' /tmp/dyn.txt; then
+              echo "::error::$machine links against glibc (libc.so.6 found)"
+              exit 1
+            fi
+            if grep -q 'ld-linux-' /tmp/dyn.txt; then
+              echo "::error::$machine links against the glibc dynamic loader"
+              exit 1
+            fi
+            grep -q 'libc\.so' /tmp/dyn.txt
+
+            echo "--- readelf -lW ---"
+            readelf -lW "$bin" | tee /tmp/phdr.txt
+
+            # 3. every LOAD segment is aligned to 16 KB (Android 15+ requirement)
+            aligns=$(awk '$1 == "LOAD" { print $NF }' /tmp/phdr.txt | tr '\n' ' ')
+            if [ -z "${aligns// /}" ]; then
+              echo "::error::$machine has no LOAD segments"
+              exit 1
+            fi
+            echo "LOAD segment alignments: $aligns"
+            if [ "$(echo $aligns | tr ' ' '\n' | sort -u)" != "0x4000" ]; then
+              echo "::error::$machine LOAD segments are not all 0x4000-aligned"
+              exit 1
+            fi
+            echo "::endgroup::"
+            echo "PASS $machine"
+          }
+
+          check "$ARM64" aarch64
+          check "$X64" x86-64
+
+      - name: Stage artifacts
+        env:
+          SRC: ${{ steps.upstream.outputs.path }}/packages/opencode/dist
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/staging"
+          cp -r "$SRC/opencode-linux-arm64-android" "$GITHUB_WORKSPACE/staging/"
+          cp -r "$SRC/opencode-linux-x64-android" "$GITHUB_WORKSPACE/staging/"
+          find "$GITHUB_WORKSPACE/staging" -type f | sort
+
+      # One artifact, two paths. upload-artifact stores entries relative to the
+      # least common ancestor (`staging`), so the archive contains exactly
+      # opencode-linux-arm64-android/bin/opencode and
+      # opencode-linux-x64-android/bin/opencode.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode-android-binaries
+          path: |
+            staging/opencode-linux-arm64-android/bin/opencode
+            staging/opencode-linux-x64-android/bin/opencode
+          retention-days: 14
+          if-no-files-found: error
