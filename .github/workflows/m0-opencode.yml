@@ -1,0 +1,475 @@
+# R2/R6 - does real opencode start and serve on Android (m0-runtime-spike T4).
+#
+# READ THIS BEFORE "FIXING" A RED RUN.
+#
+#   RED   = the harness broke: no /dev/kvm, the emulator never booted, the
+#           probe log was malformed, a run produced no log at all, or the
+#           arm64 qemu sysroot could not be assembled. Nothing was learned
+#           about opencode.
+#   GREEN = every leg attempted and recorded. A verdict of CRASH, TIMEOUT or
+#           DIED_EARLY is a FINDING, not a bug: scripts/assert-opencode-log.sh
+#           accepts all of them and only rejects malformed logs.
+#
+#   arm64 is LINK_LEVEL_ONLY in every case, successful or not. qemu-user is
+#   expected to break Bun's JIT, so a green qemu run is never evidence that
+#   opencode works on real arm64 hardware.
+#
+# Results are per API level and are never collapsed into one verdict.
+
+name: m0-opencode
+
+on:
+  push:
+    branches:
+      - main
+      - "m0-*"
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m0-opencode-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Proves the red/green distinction without an emulator: both accepted
+  # findings and rejected harness breakage, and the real probe script run
+  # against stub adb + stub servers. If this job is red, nothing below is
+  # trustworthy.
+  harness-self-test:
+    name: harness self-test (no emulator)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The log assertions accept findings and reject a broken harness
+        run: |
+          set -uo pipefail
+          t=$(mktemp -d)
+          trap 'rm -rf "$t"' EXIT
+
+          cat > "$t/healthy.log" <<'EOF'
+          OPENCODE_PROBE=1 API_LEVEL=34 SDK="34" ABI="x86_64" ANDROID_RELEASE="14" BIN_SHA256=deadbeef
+          PID=1234 SERVER_LOG_LINES=20 TIME_TO_HEALTHY_MS=1823
+          HEALTHY_BODY="{"healthy":true,"version":"1.18.34"}"
+          HEALTHY_AFTER_60S=yes FATAL_SIGNAL=0 R2_FAILURES=1
+          R2[1]="optional\tFailed to load native binding for ripgrep"
+          OPENCODE_VERDICT=HEALTHY
+          EXIT=0
+          EOF
+
+          failures=0
+          expect_accept() {
+            if bash scripts/assert-opencode-log.sh "$1" "$2" "$3" >/dev/null 2>&1; then
+              echo "PASS accept: $4"
+            else
+              echo "::error::assert-opencode-log.sh rejected a VALID log: $4"
+              bash scripts/assert-opencode-log.sh "$1" "$2" "$3" || true
+              failures=$((failures + 1))
+            fi
+          }
+          expect_reject() {
+            if bash scripts/assert-opencode-log.sh "$1" "$2" "$3" >/dev/null 2>&1; then
+              echo "::error::assert-opencode-log.sh accepted a BROKEN log: $4"
+              failures=$((failures + 1))
+            else
+              echo "PASS reject: $4"
+            fi
+          }
+
+          # The stub server log must exist and be non-empty for HEALTHY.
+          echo "some server output" > "$t/server.log"
+          expect_accept "$t/healthy.log" 34 "$t/server.log" "healthy server, one optional R2 failure"
+
+          sed 's/OPENCODE_VERDICT=HEALTHY/OPENCODE_VERDICT=CRASH/;s/TIME_TO_HEALTHY_MS=1823/TIME_TO_HEALTHY_MS=-1/;s/HEALTHY_AFTER_60S=yes/HEALTHY_AFTER_60S=no/;s/FATAL_SIGNAL=0/FATAL_SIGNAL=11/' "$t/healthy.log" > "$t/crash.log"
+          expect_accept "$t/crash.log" 34 "$t/server.log" "crash with preserved fatal signal"
+
+          sed 's/HEALTHY_AFTER_60S=yes/HEALTHY_AFTER_60S=no/;s/OPENCODE_VERDICT=HEALTHY/OPENCODE_VERDICT=DIED_EARLY/' "$t/healthy.log" > "$t/diedearly.log"
+          expect_accept "$t/diedearly.log" 34 "$t/server.log" "healthy once, died inside 60 s"
+
+          sed 's/TIME_TO_HEALTHY_MS=1823/TIME_TO_HEALTHY_MS=-1/;s/OPENCODE_VERDICT=HEALTHY/OPENCODE_VERDICT=TIMEOUT/;s/HEALTHY_AFTER_60S=yes/HEALTHY_AFTER_60S=no/;s/HEALTHY_BODY="[^"]*"/HEALTHY_BODY=""/' "$t/healthy.log" > "$t/timeout.log"
+          expect_accept "$t/timeout.log" 34 "$t/server.log" "120 s timeout, process alive"
+
+          grep -v '^OPENCODE_VERDICT=' "$t/healthy.log" > "$t/no-verdict.log"
+          expect_reject "$t/no-verdict.log" 34 "" "no verdict"
+
+          sed 's/OPENCODE_VERDICT=HEALTHY/OPENCODE_VERDICT=ALL_GOOD/' "$t/healthy.log" > "$t/badverdict.log"
+          expect_reject "$t/badverdict.log" 34 "" "unknown verdict"
+
+          sed 's/OPENCODE_VERDICT=HEALTHY/OPENCODE_VERDICT=HARNESS_BROKEN/' "$t/healthy.log" > "$t/hb.log"
+          expect_reject "$t/hb.log" 34 "" "HARNESS_BROKEN verdict"
+
+          sed 's/EXIT=0/EXIT=1/' "$t/healthy.log" > "$t/badexit.log"
+          expect_reject "$t/badexit.log" 34 "" "EXIT != 0"
+
+          sed 's/SDK="34"/SDK="35"/' "$t/healthy.log" > "$t/badsdk.log"
+          expect_reject "$t/badsdk.log" 34 "" "device SDK disagrees with matrix"
+
+          sed 's/HEALTHY_AFTER_60S=yes/HEALTHY_AFTER_60S=no/' "$t/healthy.log" > "$t/liar.log"
+          expect_reject "$t/liar.log" 34 "" "HEALTHY but did not stay alive 60 s"
+
+          sed 's/FATAL_SIGNAL=11/FATAL_SIGNAL=0/' "$t/crash.log" > "$t/crasgnone.log"
+          expect_reject "$t/crasgnone.log" 34 "" "CRASH without a preserved signal"
+
+          sed 's|R2\[1\]=.*|R2[1]="optional\\tx"|;s/R2_FAILURES=1/R2_FAILURES=2/' "$t/healthy.log" > "$t/badr2.log"
+          expect_reject "$t/badr2.log" 34 "" "R2 count contradicts inline R2[n] lines"
+
+          sed 's/API_LEVEL=34/API_LEVEL=30/' "$t/healthy.log" > "$t/wrongapi.log"
+          expect_reject "$t/wrongapi.log" 34 "" "wrong API level"
+
+          : > "$t/empty.log"
+          expect_reject "$t/empty.log" 34 "" "no output at all"
+
+          # arm64 assert
+          cat > "$t/arm64-ok.log" <<'EOF'
+          ARM64_LABEL=LINK_LEVEL_ONLY
+          ARM64_VERSION_EXIT=0
+          ARM64_VERSION_LINE="1.18.34+dev.1ddb087"
+          EOF
+          cat > "$t/arm64-fail.log" <<'EOF'
+          ARM64_LABEL=LINK_LEVEL_ONLY
+          ARM64_VERSION_EXIT=126
+          ARM64_PRESERVED_ERROR="error while loading shared libraries: libz.so.1"
+          EOF
+          cat > "$t/arm64-nolabel.log" <<'EOF'
+          ARM64_VERSION_EXIT=0
+          ARM64_VERSION_LINE="1.18.34+dev.1ddb087"
+          EOF
+          cat > "$t/arm64-empty.log" <<'EOF'
+          ARM64_LABEL=LINK_LEVEL_ONLY
+          ARM64_VERSION_EXIT=1
+          EOF
+          bash scripts/assert-arm64-link.sh "$t/arm64-ok.log" >/dev/null && echo "PASS accept: arm64 version"
+          bash scripts/assert-arm64-link.sh "$t/arm64-fail.log" >/dev/null && echo "PASS accept: arm64 preserved error"
+          if bash scripts/assert-arm64-link.sh "$t/arm64-nolabel.log" >/dev/null 2>&1; then
+            echo "::error::accept arm64 log with no LINK_LEVEL_ONLY label"; failures=$((failures+1))
+          else echo "PASS reject: arm64 without label"; fi
+          if bash scripts/assert-arm64-link.sh "$t/arm64-empty.log" >/dev/null 2>&1; then
+            echo "::error::accept arm64 log with neither version nor error"; failures=$((failures+1))
+          else echo "PASS reject: arm64 with no result"; fi
+
+          if [ "$failures" -ne 0 ]; then echo "::error::$failures harness self-test case(s) failed"; exit 1; fi
+          echo "harness self-test (assertions): all cases behaved as specified"
+
+      - name: The real probe derives its verdicts against stub adb and stub servers
+        run: |
+          set -uo pipefail
+          mkdir -p out stubbin
+
+          # Stub adb: intercepts the exact invocations the probe makes.
+          cat > stubbin/adb <<'EOF'
+          #!/usr/bin/env bash
+          case "$1" in
+            push) cp "$2" /tmp/fakeopencode ;;
+            forward) : ;;
+            pull) cp /tmp/fake-server.log "$3" ;;
+            logcat) cat /tmp/fake-logcat.txt 2>/dev/null || true ;;
+            shell)
+              case "$2" in
+                getprop*) case "$2" in
+                    *ro.build.version.sdk*) echo "${STUB_SDK:-34}" ;;
+                    *ro.build.version.release*) echo "${STUB_RELEASE:-14}" ;;
+                    *ro.product.cpu.abi*) echo "${STUB_ABI:-x86_64}" ;;
+                  esac ;;
+                chmod*) : ;;
+                "kill -0 "*) read -r _ _ pid <<< "$2"; kill -0 "$pid" 2>/dev/null || exit 1 ;;
+                "kill "*) read -r _ pid <<< "$2"; kill "$pid" 2>/dev/null || true ;;
+                sh*)
+                  pid=$(nohup "$FAKE_SERVER" >/tmp/fake-server.log 2>&1 & echo $!)
+                  echo "$pid" ;;
+                *) : ;;
+              esac ;;
+            *) : ;;
+          esac
+          EOF
+          chmod +x stubbin/adb
+
+          # Fake servers driven by FAKE_SERVER env.
+          cat > out/fake-healthy.py <<'EOF'
+          #!/usr/bin/env python3
+          import sys, time
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          print("fake server started", flush=True)
+          class H(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  if self.path == "/global/health":
+                      self.send_response(200)
+                      self.send_header('Content-Type','application/json')
+                      self.end_headers()
+                      self.wfile.write(b'{"healthy":true,"version":"1.18.34"}')
+                  else:
+                      self.send_response(404); self.end_headers()
+              def log_message(self, *a): pass
+          HTTPServer(("127.0.0.1", 4096), H).serve_forever()
+          EOF
+          cat > out/fake-never-healthy.py <<'EOF'
+          #!/usr/bin/env python3
+          import time
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          print("fake server started", flush=True)
+          class H(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  self.send_response(500); self.end_headers()
+              def log_message(self, *a): pass
+          HTTPServer(("127.0.0.1", 4096), H).serve_forever()
+          EOF
+          cat > out/fake-dies.py <<'EOF'
+          #!/usr/bin/env python3
+          import sys, time
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          print("fake server started", flush=True)
+          class H(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  if self.path == "/global/health":
+                      self.send_response(200)
+                      self.end_headers()
+                      self.wfile.write(b'{"healthy":true}')
+                      import threading
+                      threading.Timer(3, lambda: __import__('os')._exit(1)).start()
+                  else: self.send_response(404); self.end_headers()
+              def log_message(self, *a): pass
+          HTTPServer(("127.0.0.1", 4096), H).serve_forever()
+          EOF
+          chmod +x out/fake-*.py
+          echo "crash stub: Fatal signal 11 (SIGSEGV)" > /tmp/fake-logcat.txt
+
+          run_probe() {
+            set +e
+            env PATH="$PWD/stubbin:$PATH" FAKE_SERVER="$1" API_LEVEL=34 \
+              OPENCODE_HEALTH_TIMEOUT_S=3 OPENCODE_ALIVE_WINDOW_S=20 \
+              bash scripts/probe-opencode.sh 34 out "$2" > out/probe-stderr.txt 2>&1
+            rc=$?
+            set -e
+            pkill -f 'fake-' || true
+            sleep 1
+            return $rc
+          }
+
+          cp out/fake-healthy.py out/fakeopencode
+          echo "server started" > /tmp/fake-server.log
+
+          # 1. Healthy path
+          run_probe out/fake-healthy.py out/fakeopencode
+          cat out/opencode-34.log
+          bash scripts/assert-opencode-log.sh out/opencode-34.log 34 out/opencode-server-34.log
+          grep -qE 'OPENCODE_VERDICT=HEALTHY' out/opencode-34.log || { echo "::error::stub healthy server did not yield HEALTHY"; cat out/probe-stderr.txt; exit 1; }
+          grep -qE 'TIME_TO_HEALTHY_MS=[0-9]+' out/opencode-34.log || { echo "::error::no measured time to healthy"; exit 1; }
+
+          # 2. Timeout path (server alive, never healthy)
+          run_probe out/fake-never-healthy.py out/fakeopencode
+          bash scripts/assert-opencode-log.sh out/opencode-34.log 34 out/opencode-server-34.log
+          grep -qE 'OPENCODE_VERDICT=TIMEOUT' out/opencode-34.log || { echo "::error::stub never-healthy did not yield TIMEOUT"; exit 1; }
+
+          # 3. Died-early path
+          run_probe out/fake-dies.py out/fakeopencode
+          bash scripts/assert-opencode-log.sh out/opencode-34.log 34 out/opencode-server-34.log
+          grep -qE 'OPENCODE_VERDICT=DIED_EARLY' out/opencode-34.log || { echo "::error::stub dying server did not yield DIED_EARLY"; exit 1; }
+
+          # 4. No logcat crash recorded -> CRASH with no signal must be rejected (probe produced it? no - stub logcat has fatal so CRASH gets it). For a CRASH without signal, the assert fails - covered above.
+
+          echo "harness self-test (device probe): all cases behaved as specified"
+
+  fetch-opencode:
+    name: fetch opencode-android-binaries (no emulator)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the binaries artifact from the m0-t1 build run
+        uses: actions/download-artifact@v4
+        with:
+          name: opencode-android-binaries
+          run-id: 37021076702
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify both binaries are non-empty ELF 64-bit
+        run: |
+          set -euo pipefail
+          for b in opencode-linux-x64-android/bin/opencode opencode-linux-arm64-android/bin/opencode; do
+            test -s "$b"
+            file -b "$b" | grep -q 'ELF 64-bit LSB'
+            sha256sum "$b"
+          done
+
+  probe:
+    name: opencode probe (API ${{ matrix.api-level }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [harness-self-test, fetch-opencode]
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [30, 34, 35]
+    env:
+      API_LEVEL: ${{ matrix.api-level }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Assert hardware acceleration is available
+        run: |
+          if [ ! -c /dev/kvm ]; then
+            echo "::error::no /dev/kvm"
+            exit 1
+          fi
+
+      - name: Download the binaries artifact from the m0-t1 build run
+        uses: actions/download-artifact@v4
+        with:
+          name: opencode-android-binaries
+          run-id: 37021076702
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run the probe on the API ${{ matrix.api-level }} emulator
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: default
+          arch: x86_64
+          profile: Nexus 6
+          emulator-boot-timeout: 600
+          disable-animations: true
+          script: |
+            set -eu
+            bash scripts/probe-opencode.sh "${API_LEVEL}" out opencode-linux-x64-android/bin/opencode
+            echo "----- opencode-${API_LEVEL}.log -----"
+            cat "out/opencode-${API_LEVEL}.log"
+
+      - name: Assert the probe log is a well-formed result (crashes still pass)
+        run: bash scripts/assert-opencode-log.sh "out/opencode-${API_LEVEL}.log" "$API_LEVEL" "out/opencode-server-${API_LEVEL}.log"
+
+      - name: Upload the raw result for this API level
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-probe-logs-${{ matrix.api-level }}
+          path: |
+            out/opencode-${{ matrix.api-level }}.log
+            out/opencode-server-${{ matrix.api-level }}.log
+            out/r2-native-${{ matrix.api-level }}.txt
+            out/opencode-${{ matrix.api-level }}-crash.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  arm64-link-level:
+    name: arm64 opencode under qemu-user (LINK_LEVEL_ONLY)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [harness-self-test, fetch-opencode]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the binaries artifact from the m0-t1 build run
+        uses: actions/download-artifact@v4
+        with:
+          name: opencode-android-binaries
+          run-id: 37021076702
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install qemu-user
+        run: sudo apt-get install -y qemu-user
+
+      - name: Assemble a Bionic aarch64 sysroot from a public Android image
+        run: bash scripts/qemu-arm64-sysroot.sh out/sysroot-root
+
+      - name: opencode --version under qemu-aarch64
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          out=$(qemu-aarch64 -L out/sysroot-root/sysroot opencode-linux-arm64-android/bin/opencode --version 2> out/arm64-stderr.txt)
+          rc=$?
+          echo "ARM64_LABEL=LINK_LEVEL_ONLY" > out/arm64-link.log
+          echo "ARM64_VERSION_EXIT=$rc" >> out/arm64-link.log
+          if [ -n "$out" ]; then
+            echo "ARM64_VERSION_LINE=\"$out\"" >> out/arm64-link.log
+          else
+            echo "ARM64_PRESERVED_ERROR=\"$(head -5 out/arm64-stderr.txt | tr '\n' ' ' | head -c 300)\"" >> out/arm64-link.log
+          fi
+          cat out/arm64-link.log
+          cat out/arm64-stderr.txt
+
+      - name: Assert the arm64 leg produced a labelled result
+        run: bash scripts/assert-arm64-link.sh out/arm64-link.log
+
+      - name: Upload the arm64 link-level result
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-link-level
+          path: |
+            out/arm64-link.log
+            out/arm64-stderr.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  report:
+    name: opencode verdict across API levels
+    runs-on: ubuntu-latest
+    needs: [harness-self-test, fetch-opencode, probe, arm64-link-level]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download every per-API log
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: opencode-probe-logs-*
+          merge-multiple: true
+          path: logs
+
+      - name: One outcome per API level, recorded separately
+        run: |
+          set -uo pipefail
+          probes=""
+          {
+            echo "### R2/R6 - opencode serve on emulator, per API level"
+            echo
+            echo "Probe outcomes. CRASH/TIMEOUT/DIED_EARLY are findings, not harness failures."
+            echo
+            echo "| API | verdict | time to healthy (ms) | alive 60s after healthy | fatal signal | R2 failures |"
+            echo "| --- | --- | --- | --- | --- | --- |"
+          } > summary.md
+
+          missing=""
+          for api in 30 34 35; do
+            log="logs/opencode-$api.log"
+            if [ ! -s "$log" ]; then
+              missing="$missing $api"
+              echo "| $api | NO RESULT - harness broken | - | - | - | - |" >> summary.md
+              continue
+            fi
+            grep -q "OPENCODE_VERDICT=" "$log" || { echo "::error::API $api: malformed log"; exit 1; }
+            verdict=$(grep -oE 'OPENCODE_VERDICT=[A-Z_]+' "$log" | cut -d= -f2)
+            tms=$(grep -oE 'TIME_TO_HEALTHY_MS=[^ ]+' "$log" | cut -d= -f2)
+            alive=$(grep -oE 'HEALTHY_AFTER_60S=[a-z]+' "$log" | cut -d= -f2)
+            fs=$(grep -oE 'FATAL_SIGNAL=[0-9]+' "$log" | cut -d= -f2)
+            r2=$(grep -oE 'R2_FAILURES=[0-9]+' "$log" | cut -d= -f2)
+            echo "| $api | $verdict | $tms | $alive | $fs | $r2 |" >> summary.md
+          done
+
+          if [ -n "$missing" ]; then
+            echo "**HARNESS_BROKEN** - no probe result for API level(s):${missing# }" >> summary.md
+            echo "::error::no probe result for API level(s):${missing# }"
+          fi
+
+          cat summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the consolidated result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r2-opencode-summary
+          path: |
+            summary.md
+            logs/
+          if-no-files-found: error
+          retention-days: 30
