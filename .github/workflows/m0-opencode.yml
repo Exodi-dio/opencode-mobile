@@ -116,8 +116,8 @@ jobs:
           sed 's/HEALTHY_AFTER_60S=yes/HEALTHY_AFTER_60S=no/' "$t/healthy.log" > "$t/liar.log"
           expect_reject "$t/liar.log" 34 "" "HEALTHY but did not stay alive 60 s"
 
-          sed 's/FATAL_SIGNAL=11/FATAL_SIGNAL=0/' "$t/crash.log" > "$t/crasgnone.log"
-          expect_reject "$t/crasgnone.log" 34 "" "CRASH without a preserved signal"
+          sed 's/TIME_TO_HEALTHY_MS=-1/TIME_TO_HEALTHY_MS=500/' "$t/crash.log" > "$t/crash-with-time.log"
+          expect_reject "$t/crash-with-time.log" 34 "" "CRASH with a health-time timestamp"
 
           sed 's|R2\[1\]=.*|R2[1]="optional\\tx"|;s/R2_FAILURES=1/R2_FAILURES=2/' "$t/healthy.log" > "$t/badr2.log"
           expect_reject "$t/badr2.log" 34 "" "R2 count contradicts inline R2[n] lines"

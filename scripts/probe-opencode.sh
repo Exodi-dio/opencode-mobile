@@ -158,3 +158,5 @@ abstract() { head -c 200 "$1" | tr '\n' ' '; }
 } > "$log"
 
 echo "verdict=$verdict t_healthy=$t_healthy r2=$r2count signal=$fatal_signal"
+echo "----- server log (tail -60) -----"
+tail -60 "$serverlog" || true

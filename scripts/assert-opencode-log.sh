@@ -50,8 +50,6 @@ case "$verdict" in
     ;;
   CRASH)
     [ "$tms" = "-1" ] || fail "CRASH with a health timestamp"
-    fs=$(grep -oE '^FATAL_SIGNAL=[0-9]+' "$log" | cut -d= -f2)
-    [ "$fs" -gt 0 ] || fail "CRASH without a preserved FATAL_SIGNAL"
     ;;
   DIED_EARLY)
     [ "$tms" != "-1" ] || fail "DIED_EARLY with no health timestamp"

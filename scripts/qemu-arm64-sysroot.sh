@@ -59,7 +59,7 @@ if ! sudo mount -o loop,ro "$raw" /mnt/sysroot-img 2>/dev/null; then
 fi
 mp=/mnt/sysroot-img
 
-echo "mounted at $mp"; ls "$mp" | head
+echo "mounted at $mp"; ls "$mp" > /dev/null || true; ls "$mp" | head -20 || true
 
 # Collect libs and linker into the sysroot. Android 12+ keeps linker64 and
 # libc in com.android.runtime.apex; older images have them in system/bin64.
