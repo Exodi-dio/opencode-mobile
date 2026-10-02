@@ -1,0 +1,309 @@
+# R4 - PTY feasibility probe (docs/spikes/r4-pty.md)
+#
+# READ THIS BEFORE "FIXING" A RED RUN.
+#
+#   RED  = the harness broke: the NDK build failed, no /dev/kvm, the emulator
+#          never booted, or native/ptyprobe/main.c did not print a well-formed
+#          log. Nothing was learned about PTY.
+#   GREEN = the probe ran on an emulator and its verdict was recorded. The
+#          verdict may be PTY_UNAVAILABLE, and that is a finding, not a bug:
+#          the probe exits 3 in that case and nothing here treats 3 as failure.
+#
+# scripts/assert-pty-log.sh owns that distinction; the `harness-self-test` job
+# proves both halves of it against synthetic fixtures before any emulator
+# boots, so the assertions cannot silently go vacuous.
+
+name: m0-pty
+
+on:
+  push:
+    branches:
+      - main
+      - "m0-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m0-pty-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Proves the red/green distinction without an emulator, ~20 seconds:
+  # both verdicts are accepted, and every way the harness can break is
+  # rejected. If this job is red, nothing the probe job says is trustworthy.
+  harness-self-test:
+    name: harness self-test (no emulator)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The log assertions accept both verdicts and reject a broken harness
+        run: |
+          set -uo pipefail
+          t=$(mktemp -d)
+          trap 'rm -rf "$t"' EXIT
+
+          # A well-formed AVAILABLE result.
+          cat > "$t/available.log" <<'EOF'
+          PTYPROBE=1 UID=2000 EUID=2000 GID=2000 PID=3456 API_LEVEL=34 ANDROID_RELEASE="14" ABI="x86_64" SELINUX_CTX="u:r:shell:s0"
+          STEP=1 RESULT=OK ERRNO=0 MSG="Success" DETAIL="open /dev/ptmx O_RDWR"
+          STEP=2 RESULT=OK ERRNO=0 MSG="Success" DETAIL="grantpt+unlockpt ioctl TIOCSPTLCK"
+          STEP=3 RESULT=OK ERRNO=0 MSG="Success" DETAIL="open /dev/pts/0 O_RDWR|O_NOCTTY"
+          STEP=4 RESULT=OK ERRNO=0 MSG="Success" DETAIL="forkpty"
+          CHILD_PID=3457 CHILD_EXITS=0 CHILD_SIGNALED=0 CHILD_TERMINATED_BY_SIGNAL=0 CHILD_TTY="/dev/pts/0"
+          STEP=5 RESULT=OK ERRNO=0 MSG="Success" DETAIL="waitpid and child status"
+          STEPS_FAILED=0
+          PTY_VERDICT=AVAILABLE
+          EXIT=0
+          EOF
+
+          # A well-formed UNAVAILABLE result: exit 3, and green.
+          cat > "$t/unavailable.log" <<'EOF'
+          PTYPROBE=1 UID=2000 EUID=2000 GID=2000 PID=3456 API_LEVEL=34 ANDROID_RELEASE="14" ABI="x86_64" SELINUX_CTX="u:r:shell:s0"
+          STEP=1 RESULT=FAIL ERRNO=13 MSG="Permission denied" DETAIL="open /dev/ptmx O_RDWR"
+          STEP=2 RESULT=FAIL ERRNO=13 MSG="Permission denied" DETAIL="SKIPPED: step 1 produced no master fd"
+          STEP=3 RESULT=FAIL ERRNO=13 MSG="Permission denied" DETAIL="SKIPPED: no master fd"
+          STEP=4 RESULT=FAIL ERRNO=13 MSG="Permission denied" DETAIL="forkpty"
+          STEP=5 RESULT=FAIL ERRNO=13 MSG="Permission denied" DETAIL="SKIPPED: forkpty returned no pid"
+          STEPS_FAILED=5
+          PTY_VERDICT=UNAVAILABLE
+          EXIT=3
+          EOF
+
+          failures=0
+          expect_accept() {
+            if bash scripts/assert-pty-log.sh "$1" "$2" >/dev/null 2>&1; then
+              echo "PASS accept: $3"
+            else
+              echo "::error::assert-pty-log.sh rejected a VALID log: $3"
+              bash scripts/assert-pty-log.sh "$1" "$2" || true
+              failures=$((failures + 1))
+            fi
+          }
+          expect_reject() {
+            if bash scripts/assert-pty-log.sh "$1" "$2" >/dev/null 2>&1; then
+              echo "::error::assert-pty-log.sh accepted a BROKEN log: $3"
+              failures=$((failures + 1))
+            else
+              echo "PASS reject: $3"
+            fi
+          }
+
+          expect_accept "$t/available.log"   34 "PTY_VERDICT=AVAILABLE, exit 0"
+          expect_accept "$t/unavailable.log" 34 "PTY_VERDICT=UNAVAILABLE, exit 3 (a finding, not a failure)"
+
+          grep -v '^PTY_VERDICT=' "$t/available.log" > "$t/no-verdict.log"
+          expect_reject "$t/no-verdict.log" 34 "probe printed no verdict line"
+
+          { cat "$t/available.log"; echo 'PTY_VERDICT=UNAVAILABLE'; } > "$t/two-verdicts.log"
+          expect_reject "$t/two-verdicts.log" 34 "probe printed two verdict lines"
+
+          sed 's/^EXIT=0/EXIT=139/' "$t/available.log" > "$t/crash.log"
+          expect_reject "$t/crash.log" 34 "probe exited 139 (segfault) after claiming AVAILABLE"
+
+          sed 's/API_LEVEL=34/API_LEVEL=30/' "$t/available.log" > "$t/wrong-api.log"
+          expect_reject "$t/wrong-api.log" 34 "probe ran on a different API level than requested"
+
+          grep -v '^STEP=4 ' "$t/available.log" > "$t/missing-step.log"
+          expect_reject "$t/missing-step.log" 34 "probe never reported STEP=4 (forkpty)"
+
+          sed 's/^STEP=1 RESULT=OK/STEP=1 RESULT=FAIL/' "$t/available.log" > "$t/liar.log"
+          expect_reject "$t/liar.log" 34 "probe claimed AVAILABLE while a step failed"
+
+          sed 's/^STEP=2 RESULT=OK ERRNO=0/STEP=2 RESULT=FAIL ERRNO=0/' "$t/available.log" > "$t/fail-no-errno.log"
+          expect_reject "$t/fail-no-errno.log" 34 "a failed step that names no errno"
+
+          : > "$t/empty.log"
+          expect_reject "$t/empty.log" 34 "the probe produced no output at all"
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::$failures harness self-test case(s) failed"
+            exit 1
+          fi
+          echo "harness self-test: all cases behaved as specified"
+
+  probe:
+    name: pty probe (API ${{ matrix.api-level }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      # One failing emulator must not hide the other API levels' results.
+      fail-fast: false
+      matrix:
+        api-level: [30, 34, 35]
+    env:
+      API_LEVEL: ${{ matrix.api-level }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Assert hardware acceleration is available
+        run: |
+          if [ ! -c /dev/kvm ]; then
+            echo "::error::no /dev/kvm: the emulator would run unaccelerated and time out, which is a harness failure, not an R4 result"
+            exit 1
+          fi
+          ls -l /dev/kvm
+
+      - name: Install the NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          # NDK r27c, resolved from Google's repository manifest rather than
+          # from a floating "r27c" alias.
+          ndk-version: 27.2.12479018
+
+      - name: Build ptyprobe for x86_64 android${{ matrix.api-level }}
+        run: |
+          set -euo pipefail
+          clang="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android${API_LEVEL}-clang"
+          if [ ! -x "$clang" ]; then
+            echo "::error::NDK clang wrapper not found: $clang"
+            ls "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep android || true
+            exit 1
+          fi
+          mkdir -p out
+          "$clang" -std=gnu11 -O1 -Wall -Wextra -o out/ptyprobe native/ptyprobe/main.c
+          file out/ptyprobe | tee out/file.txt
+          readelf -lW out/ptyprobe > out/readelf.txt
+          # Guards against a typo'd compiler name silently producing a host
+          # binary that could never have run on the device.
+          grep -qE 'ELF 64-bit LSB .*x86-64' out/file.txt || { echo "::error::not a 64-bit x86-64 ELF"; exit 1; }
+          grep -q '/system/bin/linker64' out/readelf.txt || { echo "::error::no /system/bin/linker64 PT_INTERP: not an Android binary"; exit 1; }
+
+      - name: Run ptyprobe on the API ${{ matrix.api-level }} emulator
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: default
+          arch: x86_64
+          profile: Nexus 6
+          emulator-boot-timeout: 600
+          disable-animations: true
+          script: |
+            set -uo pipefail
+            adb push out/ptyprobe /data/local/tmp/ptyprobe
+            adb shell chmod 755 /data/local/tmp/ptyprobe
+            # Exit 3 means PTY_VERDICT=UNAVAILABLE and is recorded, not failed.
+            # Echoing the status into the log keeps a crash (139) distinguishable
+            # from the probe's own verdict.
+            adb shell "/data/local/tmp/ptyprobe > /data/local/tmp/pty-${API_LEVEL}.log 2>&1; echo EXIT=\$? >> /data/local/tmp/pty-${API_LEVEL}.log"
+            adb pull "/data/local/tmp/pty-${API_LEVEL}.log" "out/pty-${API_LEVEL}.log"
+            adb logcat -b crash -d -t 200 > "out/pty-${API_LEVEL}-crash.txt" || true
+            echo "----- pty-${API_LEVEL}.log -----"
+            cat "out/pty-${API_LEVEL}.log"
+
+      - name: Assert the probe log is a well-formed result (either verdict passes)
+        run: bash scripts/assert-pty-log.sh "out/pty-${API_LEVEL}.log" "$API_LEVEL"
+
+      - name: Surface a probe crash
+        run: |
+          if [ -s "out/pty-${API_LEVEL}-crash.txt" ] && grep -q 'ptyprobe' "out/pty-${API_LEVEL}-crash.txt"; then
+            echo "::error::the device logged a fatal signal in ptyprobe: the probe crashed, which is a harness failure"
+            cat "out/pty-${API_LEVEL}-crash.txt"
+            exit 1
+          fi
+          echo "no ptyprobe fatal signal in the device crash buffer"
+
+      - name: Upload the raw result for this API level
+        uses: actions/upload-artifact@v4
+        with:
+          name: pty-probe-logs-${{ matrix.api-level }}
+          path: |
+            out/pty-${{ matrix.api-level }}.log
+            out/pty-${{ matrix.api-level }}-crash.txt
+            out/file.txt
+            out/readelf.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  # Cross-level result. Runs even when a matrix leg failed, so that a missing
+  # API level is reported as the harness failure it is instead of disappearing
+  # behind a skipped job.
+  report:
+    name: R4 verdict across API levels
+    runs-on: ubuntu-latest
+    needs: [harness-self-test, probe]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download every per-API log
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: pty-probe-logs-*
+          merge-multiple: true
+          path: logs
+
+      - name: One verdict per API level, recorded separately
+        run: |
+          set -uo pipefail
+          summary=r4-summary.md
+          echo "### R4 - PTY availability, per Android API level" > "$summary"
+          echo >> "$summary"
+          echo "| API level | verdict | uid/euid | ABI | SELinux context |" >> "$summary"
+          echo "| --- | --- | --- | --- | --- |" >> "$summary"
+
+          missing=""
+          unavailable=""
+          for api in 30 34 35; do
+            log="logs/pty-$api.log"
+            if [ ! -s "$log" ]; then
+              missing="$missing $api"
+              echo "| $api | NO RESULT - harness broken | - | - | - |" >> "$summary"
+              continue
+            fi
+            if ! bash scripts/assert-pty-log.sh "$log" "$api" | tee "logs/assert-$api.txt"; then
+              echo "::error::API $api produced a malformed probe log"
+              exit 1
+            fi
+            verdict=$(grep -oE '^PTY_VERDICT=(AVAILABLE|UNAVAILABLE)$' "$log" | cut -d= -f2)
+            ids=$(grep -oE 'UID=[0-9]+ EUID=[0-9]+' "$log" | head -1)
+            abi=$(grep -oE 'ABI="[^"]*"' "$log" | head -1)
+            ctx=$(grep -oE 'SELINUX_CTX="[^"]*"' "$log" | head -1)
+            echo "| $api | $verdict | $ids | $abi | $ctx |" >> "$summary"
+            case "$verdict" in
+              UNAVAILABLE) unavailable="$unavailable $api" ;;
+            esac
+          done
+
+          echo >> "$summary"
+          if [ -n "$missing" ]; then
+            echo "**HARNESS_BROKEN** - no probe result for API level(s):${missing# }" >> "$summary"
+            echo "::error::no probe result for API level(s):${missing# } - absence of evidence is never a result"
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # Three verdicts, reported one by one. Never collapsed.
+          echo "API levels probed: 30, 34, 35 (x86_64 emulator, ${GITHUB_RUN_ID})" >> "$summary"
+          if [ -n "$unavailable" ]; then
+            echo "" >> "$summary"
+            echo "**PTY_VERDICT=UNAVAILABLE on API level(s):${unavailable# }** - this workflow is green because the probe worked, not because PTY works." >> "$summary"
+            echo "::warning::R4: PTY_VERDICT=UNAVAILABLE on API level(s):${unavailable# } - M2 (terminal UI) is gated off per spec Section 10 unless an in-app (untrusted_app domain) probe says otherwise"
+          else
+            echo "" >> "$summary"
+            echo "PTY_VERDICT=AVAILABLE on all three API levels." >> "$summary"
+          fi
+
+          cat "$summary"
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the consolidated result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r4-pty-summary
+          path: |
+            r4-summary.md
+            logs/
+          if-no-files-found: error
+          retention-days: 30
