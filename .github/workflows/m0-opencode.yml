@@ -404,14 +404,18 @@ jobs:
           cat out/arm64-link.log
           cat out/arm64-stderr.txt
 
-          # A real Bionic linker must be able to describe its own binaries; if
-          # it can, ELF loading and interpreter resolution already work for
-          # this exact -L sysroot.
+          # A real Bionic linker must be able to enumerate its own binaries; if
+          # it can, ELF loading and interpreter resolution have already worked
+          # for this exact -L sysroot.
           drc=0
-          do=$(qemu-aarch64 -L out/sysroot-root/sysroot out/sysroot-root/sysroot/system/bin/linker64 --describe opencode-linux-arm64-android/bin/opencode 2>&1) || drc=$?
+          do=$(qemu-aarch64 -L out/sysroot-root/sysroot opencode-linux-arm64-android/bin/opencode --version --list 2>&1) || drc=$?
           : "${drc:=0}"
           echo "ARM64_LINKER_DESCRIBE_EXIT=$drc" >> out/arm64-link.log
           echo "ARM64_LINKER_DESCRIBE=\"$(echo "$do" | head -3 | tr '\n' ';' | head -c 200)\"" >> out/arm64-link.log
+
+          # First guest-syscall lines, so a silent exit is still diagnostic.
+          qemu-aarch64 -strace -L out/sysroot-root/sysroot opencode-linux-arm64-android/bin/opencode --version 2> out/arm64-strace.txt || true
+          echo "ARM64_STRACE_FIRST=\"$(head -3 out/arm64-strace.txt | tr '\n' ';' | head -c 240)\"" >> out/arm64-link.log
 
       - name: Capture qemu syscall trace on failure
         if: failure()
