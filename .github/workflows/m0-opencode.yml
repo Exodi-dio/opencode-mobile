@@ -390,7 +390,9 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p out
-          out=$(qemu-aarch64 -L out/sysroot-root/sysroot opencode-linux-arm64-android/bin/opencode --version 2> out/arm64-stderr.txt) || rc=$?
+          : > out/arm64-strace.txt
+          out=$(qemu-aarch64 -L out/sysroot-root/sysroot \
+            opencode-linux-arm64-android/bin/opencode --version 2> out/arm64-stderr.txt) || rc=$?
           : "${rc:=0}"
           echo "ARM64_LABEL=LINK_LEVEL_ONLY" > out/arm64-link.log
           echo "ARM64_VERSION_EXIT=$rc" >> out/arm64-link.log
@@ -402,6 +404,22 @@ jobs:
           cat out/arm64-link.log
           cat out/arm64-stderr.txt
 
+          # A real Bionic linker must be able to describe its own binaries; if
+          # it can, ELF loading and interpreter resolution already work for
+          # this exact -L sysroot.
+          drc=0
+          do=$(qemu-aarch64 -L out/sysroot-root/sysroot out/sysroot-root/sysroot/system/bin/linker64 --describe opencode-linux-arm64-android/bin/opencode 2>&1) || drc=$?
+          : "${drc:=0}"
+          echo "ARM64_LINKER_DESCRIBE_EXIT=$drc" >> out/arm64-link.log
+          echo "ARM64_LINKER_DESCRIBE=\"$(echo "$do" | head -3 | tr '\n' ';' | head -c 200)\"" >> out/arm64-link.log
+
+      - name: Capture qemu syscall trace on failure
+        if: failure()
+        run: |
+          set -uo pipefail
+          qemu-aarch64 -strace -L out/sysroot-root/sysroot opencode-linux-arm64-android/bin/opencode --version 2> out/arm64-strace.txt || true
+          head -80 out/arm64-strace.txt || true
+
       - name: Assert the arm64 leg produced a labelled result
         run: bash scripts/assert-arm64-link.sh out/arm64-link.log
 
@@ -412,6 +430,7 @@ jobs:
           path: |
             out/arm64-link.log
             out/arm64-stderr.txt
+            out/arm64-strace.txt
           if-no-files-found: error
           retention-days: 30
 
