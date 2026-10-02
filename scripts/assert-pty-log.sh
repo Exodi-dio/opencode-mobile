@@ -49,21 +49,33 @@ else
   fail "expected exactly one 'PTYPROBE=1 UID=.. EUID=.. GID=..' header line"
 fi
 
-# Check for build fingerprint and build id; reject if empty/missing
+# Build identity must always be present. For a device-shaped log (Android
+# shell context or the Android shell UID) it must be a real non-empty value;
+# for host/self-test logs it may carry the "unavailable" substitute.
+device_shaped=0
+if grep -qE '^PTYPROBE=1 .*UID=2000' "$log" || grep -qE '^PTYPROBE=1 .*SELINUX_CTX="u:r:' "$log"; then
+  device_shaped=1
+fi
+
 if grep -qE '^PTYPROBE=1 .*BUILD_FINGERPRINT=' "$log"; then
   fp=$(grep -oE 'BUILD_FINGERPRINT="[^"]*"' "$log" | head -1 | sed 's/BUILD_FINGERPRINT=//' | tr -d '"')
-  if [ -z "$fp" ] || [ "$fp" = "unknown" ]; then
+  if [ -z "$fp" ]; then
     fail "BUILD_FINGERPRINT is empty"
+  elif [ "$device_shaped" = "1" ] && { [ "$fp" = "unavailable" ] || [ "$fp" = "unknown" ]; }; then
+    fail "BUILD_FINGERPRINT is the placeholder on a device-shaped log"
   else
     pass "build fingerprint present"
   fi
 else
   fail "missing BUILD_FINGERPRINT in header"
 fi
+
 if grep -qE '^PTYPROBE=1 .*BUILD_ID=' "$log"; then
   bid=$(grep -oE 'BUILD_ID="[^"]*"' "$log" | head -1 | sed 's/BUILD_ID=//' | tr -d '"')
-  if [ -z "$bid" ] || [ "$bid" = "unknown" ]; then
+  if [ -z "$bid" ]; then
     fail "BUILD_ID is empty"
+  elif [ "$device_shaped" = "1" ] && { [ "$bid" = "unavailable" ] || [ "$bid" = "unknown" ]; }; then
+    fail "BUILD_ID is the placeholder on a device-shaped log"
   else
     pass "build id present"
   fi

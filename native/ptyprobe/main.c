@@ -38,7 +38,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#ifdef __ANDROID__
 #include <sys/system_properties.h>
+#endif
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -61,9 +63,14 @@ static void report(int step, int ok, int err, const char *detail) {
 
 /* A missing or unreadable property leaves the field empty rather than lying. */
 static void read_property(const char *name, char *out, size_t out_size) {
+#ifdef __ANDROID__
   out[0] = '\0';
   if (__system_property_get(name, out) <= 0) out[0] = '\0';
   out[out_size - 1] = '\0';
+#else
+  (void)name;
+  snprintf(out, out_size, "unavailable");
+#endif
 }
 
 static void read_selinux_context(char *out, size_t out_size) {

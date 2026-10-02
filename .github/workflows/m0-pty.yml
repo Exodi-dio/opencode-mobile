@@ -70,9 +70,6 @@ jobs:
           # Run with simulate flag - on host it will behave per code
           # But system properties aren't set; let us capture what it outputs and patch if needed
           "$t/ptyprobe" --simulate-forkpty-failure > "$t/unavailable.gen" 2>&1; echo "EXIT=$?" >> "$t/unavailable.gen"
-          # Ensure build fields are present for the assertion
-          # If empty, replace with test values
-          sed -i 's/BUILD_FINGERPRINT="unknown"/BUILD_FINGERPRINT="test-build"/; s/BUILD_ID="unknown"/BUILD_ID="testid"/' "$t/unavailable.gen" 2>/dev/null || true
           cp "$t/unavailable.gen" "$t/unavailable.log"
 
           failures=0
@@ -95,7 +92,7 @@ jobs:
           }
 
           expect_accept "$t/available.log"   34 "PTY_VERDICT=AVAILABLE, exit 0"
-          expect_accept "$t/unavailable.log" 34 "PTY_VERDICT=UNAVAILABLE, exit 3 (a finding, not a failure)"
+          expect_accept "$t/unavailable.log" "" "PTY_VERDICT=UNAVAILABLE, exit 3 (a finding, not a failure)"
 
           grep -v '^PTY_VERDICT=' "$t/available.log" > "$t/no-verdict.log"
           expect_reject "$t/no-verdict.log" 34 "probe printed no verdict line"
@@ -120,6 +117,12 @@ jobs:
 
           : > "$t/empty.log"
           expect_reject "$t/empty.log" 34 "the probe produced no output at all"
+
+          sed 's/BUILD_FINGERPRINT="test-build"/BUILD_FINGERPRINT=""/' "$t/available.log" > "$t/empty-fp.log"
+          expect_reject "$t/empty-fp.log" 34 "device-shaped log with an empty BUILD_FINGERPRINT"
+
+          sed 's/ BUILD_FINGERPRINT="[^"]*"//' "$t/available.log" > "$t/no-fp.log"
+          expect_reject "$t/no-fp.log" 34 "log missing the BUILD_FINGERPRINT field entirely"
 
           if [ "$failures" -ne 0 ]; then
             echo "::error::$failures harness self-test case(s) failed"
