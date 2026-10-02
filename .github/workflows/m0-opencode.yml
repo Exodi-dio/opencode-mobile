@@ -390,8 +390,8 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p out
-          out=$(qemu-aarch64 -L out/sysroot-root/sysroot opencode-linux-arm64-android/bin/opencode --version 2> out/arm64-stderr.txt)
-          rc=$?
+          out=$(qemu-aarch64 -L out/sysroot-root/sysroot opencode-linux-arm64-android/bin/opencode --version 2> out/arm64-stderr.txt) || rc=$?
+          : "${rc:=0}"
           echo "ARM64_LABEL=LINK_LEVEL_ONLY" > out/arm64-link.log
           echo "ARM64_VERSION_EXIT=$rc" >> out/arm64-link.log
           if [ -n "$out" ]; then
