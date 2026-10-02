@@ -60,6 +60,9 @@ fi
 mp=/mnt/sysroot-img
 
 echo "mounted at $mp"; ls "$mp" > /dev/null || true; ls "$mp" | head -20 || true
+ls -la "$mp/apex" || true
+ls -la "$mp/bin" | head || true
+find "$mp" -maxdepth 4 -name 'linker64*' || true
 
 # Collect libs and linker into the sysroot. Android 12+ keeps linker64 and
 # libc in com.android.runtime.apex; older images have them in system/bin64.
