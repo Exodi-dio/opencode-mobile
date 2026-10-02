@@ -49,6 +49,7 @@
 #define EXIT_PTY_UNAVAILABLE 3
 
 static int failures = 0;
+static int simulate_forkpty_fail = 0;
 
 /* One machine-readable line per step. MSG is always strerror(err). */
 static void report(int step, int ok, int err, const char *detail) {
@@ -85,10 +86,18 @@ static void read_selinux_context(char *out, size_t out_size) {
   while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == ' ')) out[--n] = '\0';
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+  int i;
+  for (i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--simulate-forkpty-failure") == 0) {
+      simulate_forkpty_fail = 1;
+    }
+  }
   char api_level[PROP_VALUE_MAX];
   char release[PROP_VALUE_MAX];
   char abi[PROP_VALUE_MAX];
+  char build_fingerprint[PROP_VALUE_MAX];
+  char build_id[PROP_VALUE_MAX];
   char ctx[256];
   char detail[256];
   char slave_path[SLAVE_PATH_MAX];
@@ -102,15 +111,19 @@ int main(void) {
   read_property("ro.build.version.sdk", api_level, sizeof(api_level));
   read_property("ro.build.version.release", release, sizeof(release));
   read_property("ro.product.cpu.abi", abi, sizeof(abi));
+  read_property("ro.build.fingerprint", build_fingerprint, sizeof(build_fingerprint));
+  read_property("ro.build.id", build_id, sizeof(build_id));
   read_selinux_context(ctx, sizeof(ctx));
 
   /* Attribution: the verdict is only meaningful next to the API level, the
-   * ABI, and the security domain that produced it. */
+   * ABI, build identity, and the security domain that produced it. */
   printf("PTYPROBE=1 UID=%u EUID=%u GID=%u PID=%ld API_LEVEL=%s "
-         "ANDROID_RELEASE=\"%s\" ABI=\"%s\" SELINUX_CTX=\"%s\"\n",
+         "ANDROID_RELEASE=\"%s\" ABI=\"%s\" BUILD_FINGERPRINT=\"%s\" BUILD_ID=\"%s\" SELINUX_CTX=\"%s\"\n",
          (unsigned)getuid(), (unsigned)geteuid(), (unsigned)getgid(),
          (long)getpid(), api_level[0] ? api_level : "unknown",
-         release[0] ? release : "unknown", abi[0] ? abi : "unknown", ctx);
+         release[0] ? release : "unknown", abi[0] ? abi : "unknown",
+         build_fingerprint[0] ? build_fingerprint : "unknown",
+         build_id[0] ? build_id : "unknown", ctx);
   fflush(stdout);
 
   /* Step 1: allocate a master via /dev/ptmx. */
@@ -165,7 +178,12 @@ int main(void) {
    * independent of steps 1-3, so it is always attempted: when /dev/ptmx was
    * denied above, its own errno is the interesting datum. */
   errno = 0;
-  pid = forkpty(&pty_master, child_name, NULL, NULL);
+  if (simulate_forkpty_fail) {
+    pid = -1;
+    errno = EAGAIN;
+  } else {
+    pid = forkpty(&pty_master, child_name, NULL, NULL);
+  }
   if (pid < 0) {
     report(4, 0, errno, "forkpty");
   } else {
@@ -213,6 +231,9 @@ int main(void) {
         report(5, 0, 0, detail);
       }
     }
+  } else {
+    /* pid < 0: forkpty failed; step 5 must still be reported */
+    report(5, 0, errno, "SKIPPED: forkpty returned no pid");
   }
 
   if (slave >= 0) close(slave);

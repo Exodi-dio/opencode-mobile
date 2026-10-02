@@ -42,11 +42,33 @@ if [ ! -s "$log" ]; then
 fi
 
 # 1. attribution header, so no verdict can be read without knowing which API
-#    level, ABI and SELinux domain produced it.
+#    level, ABI, build identity and SELinux domain produced it.
 if [ "$(count '^PTYPROBE=1 UID=[0-9]+ EUID=[0-9]+ GID=[0-9]+ ')" = "1" ]; then
   pass "header present"
 else
   fail "expected exactly one 'PTYPROBE=1 UID=.. EUID=.. GID=..' header line"
+fi
+
+# Check for build fingerprint and build id; reject if empty/missing
+if grep -qE '^PTYPROBE=1 .*BUILD_FINGERPRINT=' "$log"; then
+  fp=$(grep -oE 'BUILD_FINGERPRINT="[^"]*"' "$log" | head -1 | sed 's/BUILD_FINGERPRINT=//' | tr -d '"')
+  if [ -z "$fp" ] || [ "$fp" = "unknown" ]; then
+    fail "BUILD_FINGERPRINT is empty"
+  else
+    pass "build fingerprint present"
+  fi
+else
+  fail "missing BUILD_FINGERPRINT in header"
+fi
+if grep -qE '^PTYPROBE=1 .*BUILD_ID=' "$log"; then
+  bid=$(grep -oE 'BUILD_ID="[^"]*"' "$log" | head -1 | sed 's/BUILD_ID=//' | tr -d '"')
+  if [ -z "$bid" ] || [ "$bid" = "unknown" ]; then
+    fail "BUILD_ID is empty"
+  else
+    pass "build id present"
+  fi
+else
+  fail "missing BUILD_ID in header"
 fi
 
 # 2. the API level the emulator reported must be the one we asked for,

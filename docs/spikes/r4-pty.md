@@ -26,7 +26,7 @@ Verdict: AVAILABLE on API 30, API 34 and API 35 independently (this line is a su
 API 30: STEP=1 RESULT=OK ERRNO=0 MSG="Success"; STEP=2 RESULT=OK ERRNO=0 MSG="Success"; STEP=3 RESULT=OK ERRNO=0 MSG="Success"; STEP=4 RESULT=OK ERRNO=0 MSG="Success"; STEP=5 RESULT=OK ERRNO=0 MSG="Success"; STEPS_FAILED=0; PTY_VERDICT=AVAILABLE; EXIT=0
 API 34: STEP=1 RESULT=OK ERRNO=0 MSG="Success"; STEP=2 RESULT=OK ERRNO=0 MSG="Success"; STEP=3 RESULT=OK ERRNO=0 MSG="Success"; STEP=4 RESULT=OK ERRNO=0 MSG="Success"; STEP=5 RESULT=OK ERRNO=0 MSG="Success"; STEPS_FAILED=0; PTY_VERDICT=AVAILABLE; EXIT=0
 API 35: STEP=1 RESULT=OK ERRNO=0 MSG="Success"; STEP=2 RESULT=OK ERRNO=0 MSG="Success"; STEP=3 RESULT=OK ERRNO=0 MSG="Success"; STEP=4 RESULT=OK ERRNO=0 MSG="Success"; STEP=5 RESULT=OK ERRNO=0 MSG="Success"; STEPS_FAILED=0; PTY_VERDICT=AVAILABLE; EXIT=0
-Consequence: M2 proceeds - an unrooted app can allocate a PTY on every API level measured. Gated on R4 and therefore no longer gated off, but see the caveats: the emulated result is from the adb `shell` SELinux domain, and x86_64 emulator results do not transfer to arm64 hardware (spec Section 10, Review Focus #2 and #3).
+Consequence: M2 proceeds conditionally on an in-app probe to establish app-domain behavior; the recorded evidence is from the adb `shell` SELinux domain only, no app-domain measurement exists. The shell-domain measurements show PTY allocation succeeded on the three emulated images (API 30/34/35). Gated on R4 and therefore no longer gated off by these shell-domain results alone, but see the caveats: the emulated result is from the adb `shell` SELinux domain, and x86_64 emulator results do not transfer to arm64 hardware (spec Section 10, Review Focus #2 and #3).
 ```
 
 ## Raw per-API results
@@ -109,15 +109,10 @@ about PTY, and neither is cited as evidence.
 
 ## Caveats - what this result does not establish
 
-1. **Measured in the `shell` SELinux domain, not an app domain.** Every log
+1. **No app-domain measurement exists.** Every log
    above is `UID=2000 EUID=2000 SELINUX_CTX="u:r:shell:s0"` - the `adb shell`
-   domain. `private/shell.te` places `shell` inside the `appdomain` attribute
-   (`app_domain(shell)`, present on `android11-release`, `android15-release` and
-   `main`), and from `refs/heads/android13-release` on, `private/app.te` grants
-   `allow appdomain devpts:chr_file { getattr read write ioctl };` - that is the
-   rule a packaged app would rely on. A packaged app nevertheless runs as its own
-   `untrusted_app_*` domain, and **no run here exercised that domain.** The
-   `::warning::` annotation is only emitted for `UNAVAILABLE`, so this caveat has
+   domain. No measurement was obtained in an `untrusted_app_*` domain.
+
    to be read, not skimmed past.
 2. **x86_64 emulator, not arm64 hardware** (Review Focus #2). Nothing here is an
    arm64 measurement. R4 is a permission question rather than a performance one,
@@ -147,52 +142,6 @@ about PTY, and neither is cited as evidence.
 7. **Two runs, identical verdict.** Runs 36998915751 and 37000707941 agree on
    all three API levels, so R4 is not flaky. Task 5's reproducibility pass is
    still the formal check for the spike as a whole.
-
-## Supplementary observation (NOT part of the recorded verdict)
-
-The `shell`-domain caveat above is the real gap in the recorded evidence, so
-one observation was made outside CI to probe the app domain directly. It is
-recorded separately because it is a different ABI, a different domain, a real
-device, and it did not come from the authoritative run.
-
-Observed on the maintainer's own phone, API 34 / Android 14, `arm64-v8a`,
-HONOR GFY-LX2P, `user` build, from a Termux process whose own context is
-`u:r:untrusted_app_27:s0:c117,c257,c512,c768` - i.e. an ordinary unrooted app:
-
-```
-$ cat /proc/self/attr/current
-u:r:untrusted_app_27:s0:c117,c257,c512,c768
-$ ls -Z /dev/ptmx
-u:object_r:ptmx_device:s0 /dev/ptmx
-$ script -qec 'echo PTY_CHILD_OK; tty' /dev/null
-PTY_CHILD_OK
-/dev/pts/29
-```
-
-`script` allocates the pair with `forkpty(3)`, and the child read its own
-controlling terminal back as `/dev/pts/29` via `readlink("/proc/self/fd/0")` -
-so the fd really is a tty and really is the pty slave. Meanwhile `ls /dev/pts`
-is denied to the same domain, while the directory's own mode is
-`drwxr-xr-x root:root`, which DAC would have permitted. The denial is therefore
-on the `devpts` *directory* search access, not on the slave device node: an app
-does not need to enumerate `/dev/pts` to get a pty.
-
-This is consistent with AOSP's own policy, which from `refs/heads/android13-release`
-onwards (`system/sepolicy`, `private/app.te`) contains:
-
-```
-allow appdomain devpts:chr_file { getattr read write ioctl };
-```
-
-with, on `refs/heads/main`'s `private/domain.te`:
-`allow domain devpts:dir search;` and
-`neverallowxperm * devpts:chr_file ioctl TIOCSTI;`. The
-same `appdomain devpts` line is **absent** from `private/app.te` on
-`refs/heads/android11-release` and `android12-release` (both files fetched
-successfully; 2069 and 4218 bytes, zero `devpts` matches), so where API 30
-apps get their `devpts` access was not established. **The API 30 app-domain
-path therefore rests on the emulator run plus this policy reading, not on a
-direct app-domain measurement.**
 
 ## What would change this verdict
 
