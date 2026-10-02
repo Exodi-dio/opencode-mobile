@@ -134,17 +134,24 @@ jobs:
             echo "--- readelf -lW ---"
             readelf -lW "$bin" | tee /tmp/phdr.txt
 
-            # 3. every LOAD segment is aligned to 16 KB (Android 15+ requirement)
+            # 3. Android 15+ 16 KB page-size compatibility: every LOAD segment's p_align
+            #    must be a positive multiple of 0x4000 (16 KB). Bun emits 0x4000
+            #    for the R E text segment and 0x10000 (64 KB) for the RW data
+            #    segment; 64 KB is strictly stronger than 16 KB and satisfies the
+            #    requirement. The failure this assertion exists to catch is 0x1000
+            #    (4 KB) or 0x2000 (8 KB), which break on 16 KB devices.
             aligns=$(awk '$1 == "LOAD" { print $NF }' /tmp/phdr.txt | tr '\n' ' ')
             if [ -z "${aligns// /}" ]; then
               echo "::error::$machine has no LOAD segments"
               exit 1
             fi
             echo "LOAD segment alignments: $aligns"
-            if [ "$(echo $aligns | tr ' ' '\n' | sort -u)" != "0x4000" ]; then
-              echo "::error::$machine LOAD segments are not all 0x4000-aligned"
-              exit 1
-            fi
+            for align in $aligns; do
+              if [ "$align" = "0x0" ] || [ $((align % 0x4000)) -ne 0 ]; then
+                echo "::error::$machine LOAD segment alignment $align is not a positive multiple of 0x4000 (16 KB)"
+                exit 1
+              fi
+            done
             echo "::endgroup::"
             echo "PASS $machine"
           }

@@ -136,6 +136,38 @@ identical work for no extra coverage.
   prebuilds rather than compiling; nothing was added for Android.
 - No ripgrep change. See the known gap below.
 
+## What the build actually produces
+
+Measured by the `Assert android binaries` step in `.github/workflows/m0-build.yml`. Both
+targets come out of one `build.ts` invocation, each in its own `dist/` subdirectory:
+
+| | arm64 | x64 |
+| --- | --- | --- |
+| path | `dist/opencode-linux-arm64-android/bin/opencode` | `dist/opencode-linux-x64-android/bin/opencode` |
+| size | ~158 MiB | ~160 MiB |
+| `file` | `ELF 64-bit LSB pie executable, ARM aarch64, ... dynamically linked` | `ELF 64-bit LSB pie executable, x86-64, ... dynamically linked` |
+| `PT_INTERP` | `/system/bin/linker64` | `/system/bin/linker64` |
+| `DT_NEEDED` | `libc.so`, `libm.so`, `libdl.so` | same |
+| `PT_LOAD` align | `0x4000` (R E), `0x10000` (RW) | same |
+
+Two things worth writing down because they are not what the brief predicted:
+
+- **The `DT_NEEDED` list is Bionic, and it is minimal.** No `libc.so.6`, no
+  `ld-linux-*`; the interpreter is Android's own `/system/bin/linker64`. This matches
+  what oven-sh/bun#29675 reported (`NEEDED = libc/libm/liblog/libdl`).
+- **The text segment is `0x4000` but the data segment is `0x10000`.** The M0 brief asked
+  the assertion to check for `Align` of exactly `0x4000` on `LOAD` segments. `0x10000`
+  is 64 KB, i.e. four 16 KB pages — strictly *stronger* than the 16 KB
+  `max-page-size` Android 15+ requires, and satisfying it. The assertion therefore
+  checks what the requirement actually is: every `LOAD` segment's `p_align` is a
+  positive multiple of `0x4000`. It still fails hard on `0x1000` (4 KB) and `0x2000`
+  (8 KB), which are the alignments that actually break on a 16 KB device. Checked for
+  equality to `0x4000` instead, the assertion would have rejected a better-aligned
+  binary, which is a bug in the assertion, not in the artifact.
+
+Nothing here has been run on a device. Every claim above is from `file`/`readelf` on the
+CI runner.
+
 ## Known gap for Task 4: ripgrep's platform table
 
 `packages/core/src/ripgrep/binary.ts` builds its download key from
