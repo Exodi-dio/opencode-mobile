@@ -285,15 +285,33 @@ jobs:
           EOF
           chmod 755 out/fakebun-crash
 
+          # Stand in for the device's getprop(1), so the header carries the same
+          # environment facts a real run does. API_LEVEL comes from the caller's
+          # matrix and SDK comes from here, and assert-bun-log.sh cross-checks
+          # the two - which means the cross-check is only testable if the stub
+          # environment answers getprop at all.
+          mkdir -p out/stub-bin
+          cat > out/stub-bin/getprop <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            ro.build.version.sdk) echo "${STUB_SDK:-34}" ;;
+            ro.product.cpu.abi) echo "${STUB_ABI:-x86_64}" ;;
+            ro.build.version.release) echo "${STUB_RELEASE:-14}" ;;
+          esac
+          EOF
+          chmod 755 out/stub-bin/getprop
+
           # Keep the device script valid POSIX sh.
           sh -n scripts/bun-probe-device.sh
 
           # Runs the real on-device script with the workflow's EXIT= convention,
           # without letting set -e abort before the exit code is recorded.
+          # $3, when given, is extra KEY=VALUE for the stub environment.
           run_device_probe() {
-            bin="$1"; log="$2"
+            bin="$1"; log="$2"; extra="${3:-}"
             set +e
-            BUN="$bin" API_LEVEL=34 sh scripts/bun-probe-device.sh > "$log" 2>&1
+            env PATH="$PWD/out/stub-bin:$PATH" BUN="$bin" API_LEVEL=34 $extra \
+              sh scripts/bun-probe-device.sh > "$log" 2>&1
             rc=$?
             set -e
             echo "EXIT=$rc" >> "$log"
@@ -382,7 +400,21 @@ jobs:
           done
           bash scripts/assert-bun-log.sh out/stub-crash.log 34
 
-          # 6. Missing binary: HARNESS_BROKEN must be rejected by the assert.
+          # 6. Wrong system image: the device reports an SDK the caller did not
+          #    ask for. The log must carry API_LEVEL_MISMATCH and must be
+          #    rejected, not filed under the requested API level.
+          run_device_probe "$PWD/out/fakebun-good" out/stub-wrong-image.log "STUB_SDK=31"
+          grep -q 'API_LEVEL_MISMATCH=34-vs-31' out/stub-wrong-image.log || {
+            echo "::error::a device on a different SDK level did not record API_LEVEL_MISMATCH"
+            cat out/stub-wrong-image.log
+            exit 1
+          }
+          if bash scripts/assert-bun-log.sh out/stub-wrong-image.log 34 >/dev/null 2>&1; then
+            echo "::error::the assert accepted a log recorded on a different API level"
+            exit 1
+          fi
+
+          # 7. Missing binary: HARNESS_BROKEN must be rejected by the assert.
           #    The device script exits 4 here, which is expected, not a failure.
           run_device_probe /nonexistent/bun out/stub-missing.log || true
           grep -q '^BUN_PROBE_VERDICT=HARNESS_BROKEN ' out/stub-missing.log || {
