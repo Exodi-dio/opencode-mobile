@@ -190,7 +190,8 @@ jobs:
           emulator-boot-timeout: 600
           disable-animations: true
           script: |
-            set -uo pipefail
+            # This block is executed by /usr/bin/sh (dash), not bash: keep it POSIX.
+            set -eu
             adb push out/ptyprobe /data/local/tmp/ptyprobe
             adb shell chmod 755 /data/local/tmp/ptyprobe
             # Exit 3 means PTY_VERDICT=UNAVAILABLE and is recorded, not failed.
