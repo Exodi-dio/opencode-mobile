@@ -1,0 +1,433 @@
+# Bun Android runtime probe - risks R1 (JIT), R3 (TLS/CA store), R6 (RAM/startup).
+#
+# READ THIS BEFORE "FIXING" A RED RUN.
+#
+#   RED   = the harness broke: no /dev/kvm, the emulator never booted, a probe
+#           log was malformed, or an API level produced no log at all. Nothing
+#           was learned about Bun.
+#   GREEN = every probe on every API level was attempted and its outcome
+#           recorded. The outcome may be a CRASH, a FAIL or a TIMEOUT, and that
+#           is a finding, not a bug: scripts/assert-bun-log.sh accepts all of
+#           them and only rejects a malformed log.
+#
+# The harness-self-test job proves both halves of that contract - against
+# synthetic fixtures AND by running the real on-device probe against a stub bun -
+# before any emulator boots, so the assertions cannot silently go vacuous.
+#
+# Results are per API level and are never collapsed into one verdict.
+
+name: m0-bun
+
+on:
+  push:
+    branches:
+      - main
+      - "m0-*"
+    # The spike write-up lives in docs/. A docs-only push does not change the
+    # probe, so re-running three emulators on it would only add flake risk.
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m0-bun-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # See docs/spikes/r1-bun.md and the plan's global constraints. 1.4.2 is the
+  # first Bun release that publishes an Android target at all.
+  BUN_VERSION: "1.4.2"
+
+jobs:
+  # Proves the red/green distinction without an emulator and without network.
+  # If this job is red, nothing any probe job says is trustworthy.
+  harness-self-test:
+    name: harness self-test (no emulator)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The log assertions accept findings and reject a broken harness
+        run: |
+          set -uo pipefail
+          t=$(mktemp -d)
+          trap 'rm -rf "$t"' EXIT
+
+          # A well-formed result where every probe passed.
+          cat > "$t/good.log" <<'EOF'
+          BUNPROBE=1 API_LEVEL=34 ANDROID_RELEASE="14" SDK="34" ABI="x86_64" SELINUX_CTX="u:r:shell:s0" CASTORE_DIR=present CASTORE_COUNT=151 BUN=/data/local/tmp/bun
+          PROBE=version STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=812 EXPECTED="1.4.2" OBSERVED="1.4.2"
+          PROBE=js-engine STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=845 EXPECTED="2" OBSERVED="2"
+          PROBE=engine-usable STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=2013 EXPECTED="done" OBSERVED="done"
+          PROBE=tls STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=690 EXPECTED="200" OBSERVED="200"
+          PROBE=platform STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=820 EXPECTED="android x64" OBSERVED="android x64"
+          COLD_START_MS_SAMPLES=" 810 800 812 830 805" COLD_START_MS_MEDIAN=810 COLD_START_CLOCK=date-ns COLD_START_N=5
+          RSS_VMHWM_KB=128000 RSS_SOURCE=/proc/<pid>/status RSS_NOTE="peak RSS of a sleeping bun process, sampled ~3s after start"
+          BUN_VERSION_LINE="1.4.2" BUN_REVISION="UNSUPPORTED(rc=1)"
+          JIT_MAPS_OBSERVED="exec_anon=0 exec_file=3 w_and_x=0 sample="
+          JIT_DETERMINATION=OPEN JIT_BASIS="no positive in-binary signal"
+          BUN_PROBE_VERDICT=COMPLETE
+          EXIT=0
+          EOF
+
+          failures=0
+          expect_accept() {
+            if bash scripts/assert-bun-log.sh "$1" "$2" >/dev/null 2>&1; then
+              echo "PASS accept: $3"
+            else
+              echo "::error::assert-bun-log.sh rejected a VALID log: $3"
+              bash scripts/assert-bun-log.sh "$1" "$2" || true
+              failures=$((failures + 1))
+            fi
+          }
+          expect_reject() {
+            if bash scripts/assert-bun-log.sh "$1" "$2" >/dev/null 2>&1; then
+              echo "::error::assert-bun-log.sh accepted a BROKEN log: $3"
+              failures=$((failures + 1))
+            else
+              echo "PASS reject: $3"
+            fi
+          }
+
+          expect_accept "$t/good.log" 34 "all probes PASS, verdict COMPLETE, exit 0"
+
+          # A crashed probe is a FINDING and must be accepted, not failed.
+          sed 's/^PROBE=version STATUS=PASS EXIT=0 SIGNAL=0/PROBE=version STATUS=CRASH EXIT=139 SIGNAL=11/' "$t/good.log" > "$t/crash.log"
+          expect_accept "$t/crash.log" 34 "PROBE=version CRASH SIGNAL=11 EXIT=139 (a finding, not a failure)"
+
+          # A failed TLS probe is R3's finding and must be accepted.
+          sed 's/^PROBE=tls STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=690 EXPECTED="200" OBSERVED="200"/PROBE=tls STATUS=FAIL EXIT=9 SIGNAL=0 ELAPSED_MS=690 EXPECTED="200" OBSERVED="FETCH_ERROR: unable to verify the first certificate"/' "$t/good.log" > "$t/tls-fail.log"
+          expect_accept "$t/tls-fail.log" 34 "PROBE=tls FAIL with the raw error preserved (R3 finding)"
+
+          # A timed-out usable-engine probe is a finding and must be accepted.
+          sed 's/^PROBE=engine-usable STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=2013/PROBE=engine-usable STATUS=TIMEOUT EXIT=124 SIGNAL=0 ELAPSED_MS=30000/' "$t/good.log" > "$t/timeout.log"
+          expect_accept "$t/timeout.log" 34 "PROBE=engine-usable TIMEOUT EXIT=124 (too slow is a finding)"
+
+          grep -v '^BUN_PROBE_VERDICT=' "$t/good.log" > "$t/no-verdict.log"
+          expect_reject "$t/no-verdict.log" 34 "no verdict line"
+
+          { cat "$t/good.log"; echo 'BUN_PROBE_VERDICT=COMPLETE'; } > "$t/two-verdicts.log"
+          expect_reject "$t/two-verdicts.log" 34 "two verdict lines"
+
+          sed 's/^BUN_PROBE_VERDICT=COMPLETE/BUN_PROBE_VERDICT=HARNESS_BROKEN/' "$t/good.log" > "$t/harness-broken.log"
+          expect_reject "$t/harness-broken.log" 34 "verdict HARNESS_BROKEN (the probe never ran)"
+
+          sed 's/^EXIT=0/EXIT=139/' "$t/good.log" > "$t/contradiction.log"
+          expect_reject "$t/contradiction.log" 34 "verdict COMPLETE contradicts EXIT=139"
+
+          grep -v '^EXIT=0' "$t/good.log" > "$t/no-exit.log"
+          expect_reject "$t/no-exit.log" 34 "no EXIT= line"
+
+          sed 's/API_LEVEL=34/API_LEVEL=30/' "$t/good.log" > "$t/wrong-api.log"
+          expect_reject "$t/wrong-api.log" 34 "log from a different API level than requested"
+
+          grep -v '^PROBE=platform ' "$t/good.log" > "$t/missing-probe.log"
+          expect_reject "$t/missing-probe.log" 34 "a probe never reported"
+
+          { cat "$t/good.log"; echo 'PROBE=platform STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=800 EXPECTED="android x64" OBSERVED="android x64"'; } > "$t/dup-probe.log"
+          expect_reject "$t/dup-probe.log" 34 "a probe reported twice"
+
+          sed 's/^PROBE=version STATUS=PASS/PROBE=version STATUS=OK/' "$t/good.log" > "$t/bad-status.log"
+          expect_reject "$t/bad-status.log" 34 "a probe with an unknown STATUS"
+
+          : > "$t/empty.log"
+          expect_reject "$t/empty.log" 34 "no output at all"
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::$failures harness self-test case(s) failed"
+            exit 1
+          fi
+          echo "harness self-test (assertions): all cases behaved as specified"
+
+      - name: The real on-device probe runs end to end against a stub bun
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cat > out/fakebun <<'EOF'
+          #!/bin/sh
+          if [ "$1" = "--version" ]; then echo "1.4.2"; exit 0; fi
+          if [ "$1" = "--revision" ]; then echo "fakebun-revision-1"; exit 0; fi
+          program="$2"
+          case "$program" in
+            *"console.log(1+1)"*) echo 2 ;;
+            *"for(let i=0;i<3e7"*) echo done ;;
+            *"fetch("*) echo 200 ;;
+            *"process.platform"*) echo "android x64" ;;
+            *"/proc/self/maps"*) echo "exec_anon=1 exec_file=2 w_and_x=0 sample=[anon]" ;;
+            *"setTimeout"*) sleep 8 ;;
+            *) echo "fakebun: unknown program" >&2; exit 64 ;;
+          esac
+          EOF
+          cat > out/fakebun-crash <<'EOF'
+          #!/bin/sh
+          if [ "$1" = "--version" ]; then kill -SEGV $$; fi
+          echo "fakebun-crash" >&2; exit 64
+          EOF
+          chmod 755 out/fakebun out/fakebun-crash
+
+          # Keep the device script valid POSIX sh.
+          sh -n scripts/bun-probe-device.sh
+
+          # 1. Happy path: the whole harness produces a COMPLETE result that the
+          #    assert script accepts.
+          BUN="$PWD/out/fakebun" API_LEVEL=34 sh scripts/bun-probe-device.sh > out/stub-good.log 2>&1; echo "EXIT=$?" >> out/stub-good.log
+          cat out/stub-good.log
+          bash scripts/assert-bun-log.sh out/stub-good.log 34
+
+          # 2. Crash path: a segfaulting bun's SIGSEGV is detected and preserved,
+          #    and the harness still reaches COMPLETE.
+          BUN="$PWD/out/fakebun-crash" API_LEVEL=34 sh scripts/bun-probe-device.sh > out/stub-crash.log 2>&1; echo "EXIT=$?" >> out/stub-crash.log
+          grep -q '^PROBE=version STATUS=CRASH EXIT=139 SIGNAL=11 ' out/stub-crash.log || {
+            echo "::error::the harness did not record the stub's SIGSEGV as CRASH SIGNAL=11"
+            cat out/stub-crash.log
+            exit 1
+          }
+          bash scripts/assert-bun-log.sh out/stub-crash.log 34
+
+          # 3. Missing binary: HARNESS_BROKEN must be rejected by the assert.
+          BUN=/nonexistent/bun API_LEVEL=34 sh scripts/bun-probe-device.sh > out/stub-missing.log 2>&1; echo "EXIT=$?" >> out/stub-missing.log
+          grep -q '^BUN_PROBE_VERDICT=HARNESS_BROKEN ' out/stub-missing.log || {
+            echo "::error::a missing bun binary did not produce HARNESS_BROKEN"
+            cat out/stub-missing.log
+            exit 1
+          }
+          if bash scripts/assert-bun-log.sh out/stub-missing.log 34 >/dev/null 2>&1; then
+            echo "::error::the assert accepted a HARNESS_BROKEN log"
+            exit 1
+          fi
+          echo "harness self-test (device probe): all cases behaved as specified"
+
+  # Fetches and integrity-verifies BOTH Android packages. The x86_64 binary is
+  # what executes on the emulator; the arm64 binary is the shipped target and is
+  # inspected here (never executed - see the arm64 honesty gap in the design
+  # spec, Section 8.1).
+  fetch-verify:
+    name: fetch and verify Bun Android tarballs (no emulator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch both packages, verifying each published SHA-512
+        id: fetch
+        run: |
+          set -euo pipefail
+          mapfile -t paths < <(CI=true ./scripts/probe-bun.sh both)
+          if [ "${#paths[@]}" -ne 2 ]; then
+            echo "::error::expected two binary paths from probe-bun.sh, got ${#paths[@]}"
+            printf '%s\n' "${paths[@]}"
+            exit 1
+          fi
+          echo "x64=${paths[0]}" >> "$GITHUB_OUTPUT"
+          echo "arm64=${paths[1]}" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect the extracted binaries
+        env:
+          X64: ${{ steps.fetch.outputs.x64 }}
+          ARM64: ${{ steps.fetch.outputs.arm64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+
+          check_binary() {
+            bin="$1" machine="$2" label="$3"
+            echo "::group::$label: $bin"
+            if [ ! -s "$bin" ]; then echo "::error::$label binary is empty"; exit 1; fi
+
+            file -b "$bin" | tee "out/$label-file.txt"
+            grep -q 'ELF 64-bit LSB' "out/$label-file.txt" || { echo "::error::$label is not a 64-bit ELF"; exit 1; }
+            grep -qi "$machine" "out/$label-file.txt" || { echo "::error::$label is not $machine"; exit 1; }
+
+            readelf -d "$bin" | tee "out/$label-dyn.txt"
+            if grep -q 'libc\.so\.6' "out/$label-dyn.txt"; then echo "::error::$label links against glibc"; exit 1; fi
+            if grep -q 'ld-linux-' "out/$label-dyn.txt"; then echo "::error::$label links against the glibc loader"; exit 1; fi
+            grep -q 'libc\.so' "out/$label-dyn.txt" || { echo "::error::$label does not link bionic libc"; exit 1; }
+
+            sha256sum "$bin" | tee "out/$label-sha256.txt"
+            stat -c '%n %s bytes' "$bin" | tee "out/$label-size.txt"
+            echo "::endgroup::"
+          }
+
+          check_binary "$X64" 'x86-64' x64
+          check_binary "$ARM64" 'aarch64' arm64
+
+      - name: Upload the fetch/inspection record
+        uses: actions/upload-artifact@v4
+        with:
+          name: bun-fetch-info
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
+
+  probe:
+    name: bun probe (API ${{ matrix.api-level }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: harness-self-test
+    strategy:
+      # One failing emulator must not hide the other API levels' results.
+      fail-fast: false
+      matrix:
+        api-level: [30, 34, 35]
+    env:
+      API_LEVEL: ${{ matrix.api-level }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Assert hardware acceleration is available
+        run: |
+          if [ ! -c /dev/kvm ]; then
+            echo "::error::no /dev/kvm: the emulator would run unaccelerated and time out, which is a harness failure, not a Bun result"
+            exit 1
+          fi
+          ls -l /dev/kvm
+
+      - name: Fetch the x86_64 Bun Android binary (CI-only)
+        id: bun
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          bin="$(CI=true ./scripts/probe-bun.sh x64)"
+          cp "$bin" out/bun
+          chmod 755 out/bun
+          file out/bun
+          readelf -d out/bun | grep -E 'NEEDED|libc\.so' || true
+
+      - name: Run the probe on the API ${{ matrix.api-level }} emulator
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: default
+          arch: x86_64
+          profile: Nexus 6
+          emulator-boot-timeout: 600
+          disable-animations: true
+          script: |
+            # This block is executed by /usr/bin/sh (dash), not bash: keep it POSIX.
+            set -eu
+            adb push out/bun /data/local/tmp/bun
+            adb push scripts/bun-probe-device.sh /data/local/tmp/bun-probe-device.sh
+            adb shell chmod 755 /data/local/tmp/bun /data/local/tmp/bun-probe-device.sh
+            # EXIT is appended so a probe-script harness failure (e.g. 4) stays
+            # distinguishable from the probes' own findings, which are all
+            # recorded inside the log and always end in COMPLETE/0.
+            adb shell "API_LEVEL=${API_LEVEL} BUN=/data/local/tmp/bun sh /data/local/tmp/bun-probe-device.sh > /data/local/tmp/bun-${API_LEVEL}.log 2>&1; echo EXIT=\$? >> /data/local/tmp/bun-${API_LEVEL}.log"
+            adb pull "/data/local/tmp/bun-${API_LEVEL}.log" "out/bun-${API_LEVEL}.log"
+            adb logcat -b crash -d -t 400 > "out/bun-${API_LEVEL}-crash.txt" || true
+            echo "----- bun-${API_LEVEL}.log -----"
+            cat "out/bun-${API_LEVEL}.log"
+
+      - name: Assert the probe log is a well-formed result (crashes still pass)
+        run: bash scripts/assert-bun-log.sh "out/bun-${API_LEVEL}.log" "$API_LEVEL"
+
+      - name: Upload the raw result for this API level
+        uses: actions/upload-artifact@v4
+        with:
+          name: bun-probe-logs-${{ matrix.api-level }}
+          path: |
+            out/bun-${{ matrix.api-level }}.log
+            out/bun-${{ matrix.api-level }}-crash.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  # Cross-level result. Runs even when a matrix leg failed, so a missing API
+  # level is reported as the harness failure it is instead of disappearing
+  # behind a skipped job. This job is where "per API level" is enforced.
+  report:
+    name: Bun verdict across API levels
+    runs-on: ubuntu-latest
+    needs: [harness-self-test, fetch-verify, probe]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download every per-API log
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: bun-probe-logs-*
+          merge-multiple: true
+          path: logs
+
+      - name: One outcome per API level, recorded separately
+        run: |
+          set -uo pipefail
+          summary=bun-summary.md
+          {
+            echo "### R1/R3/R6 - Bun Android runtime, per API level"
+            echo
+            echo "| API | verdict | version | js-engine | engine-usable | tls (R3) | platform | cold-start ms | RSS KB | JIT |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+          } > "$summary"
+
+          missing=""
+          findings=""
+          for api in 30 34 35; do
+            log="logs/bun-$api.log"
+            if [ ! -s "$log" ]; then
+              missing="$missing $api"
+              echo "| $api | NO RESULT - harness broken | - | - | - | - | - | - | - | - |" >> "$summary"
+              continue
+            fi
+            if ! bash scripts/assert-bun-log.sh "$log" "$api" | tee "logs/assert-$api.txt"; then
+              echo "::error::API $api produced a malformed probe log"
+              exit 1
+            fi
+            status_of() { grep -E "^PROBE=$1 " "$log" | sed -E 's/^PROBE=[^ ]+ STATUS=([^ ]+).*/\1/'; }
+            version=$(grep -oE '^BUN_VERSION_LINE="[^"]*"' "$log" | sed 's/^BUN_VERSION_LINE="//; s/"$//')
+            cold=$(grep -oE 'COLD_START_MS_MEDIAN=[0-9]+' "$log" | cut -d= -f2)
+            rss=$(grep -oE 'RSS_VMHWM_KB=[^ ]+' "$log" | cut -d= -f2)
+            jit=$(grep -oE 'JIT_DETERMINATION=[^ ]+' "$log" | cut -d= -f2)
+            echo "| $api | COMPLETE | $version | $(status_of js-engine) | $(status_of engine-usable) | $(status_of tls) | $(status_of platform) | $cold | $rss | $jit |" >> "$summary"
+
+            for p in version js-engine engine-usable tls platform; do
+              s=$(status_of "$p")
+              case "$s" in
+                PASS|") ;;
+                *) findings="$findings API$api:$p=$s" ;;
+              esac
+            done
+          done
+
+          echo >> "$summary"
+          if [ -n "$missing" ]; then
+            echo "**HARNESS_BROKEN** - no probe result for API level(s):${missing# }" >> "$summary"
+            echo "::error::no probe result for API level(s):${missing# } - absence of evidence is never a result"
+            cat "$summary"
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "API levels probed: 30, 34, 35 (x86_64 emulator, run ${GITHUB_RUN_ID})" >> "$summary"
+          if [ -n "$findings" ]; then
+            echo >> "$summary"
+            echo "**Findings (not harness failures):${findings}** - read docs/spikes/r1-bun.md." >> "$summary"
+            echo "::warning::Bun probe findings on emulator:${findings} - these are recorded results, not a broken harness"
+          else
+            echo >> "$summary"
+            echo "All five probes PASS on all three API levels." >> "$summary"
+          fi
+
+          cat "$summary"
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the consolidated result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r1-bun-summary
+          path: |
+            bun-summary.md
+            logs/
+          if-no-files-found: error
+          retention-days: 30
