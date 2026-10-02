@@ -69,7 +69,9 @@ jobs:
           # Generate UNAVAILABLE result using probe with simulate-forkpty-failure
           # Run with simulate flag - on host it will behave per code
           # But system properties aren't set; let us capture what it outputs and patch if needed
-          "$t/ptyprobe" --simulate-forkpty-failure > "$t/unavailable.gen" 2>&1; echo "EXIT=$?" >> "$t/unavailable.gen"
+          rc=0
+          "$t/ptyprobe" --simulate-forkpty-failure > "$t/unavailable.gen" 2>&1 || rc=$?
+          echo "EXIT=$rc" >> "$t/unavailable.gen"
           cp "$t/unavailable.gen" "$t/unavailable.log"
 
           failures=0
