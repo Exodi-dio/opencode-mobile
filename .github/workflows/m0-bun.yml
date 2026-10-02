@@ -3,15 +3,16 @@
 # READ THIS BEFORE "FIXING" A RED RUN.
 #
 #   RED   = the harness broke: no /dev/kvm, the emulator never booted, a probe
-#           log was malformed, or an API level produced no log at all. Nothing
-#           was learned about Bun.
+#           log was malformed or incomplete, or an API level produced no log at
+#           all. Nothing was learned about Bun.
 #   GREEN = every probe on every API level was attempted and its outcome
 #           recorded. The outcome may be a CRASH, a FAIL or a TIMEOUT, and that
 #           is a finding, not a bug: scripts/assert-bun-log.sh accepts all of
-#           them and only rejects a malformed log.
+#           them and only rejects a log that is malformed or that is missing a
+#           measurement entirely.
 #
 # The harness-self-test job proves both halves of that contract - against
-# synthetic fixtures AND by running the real on-device probe against a stub bun -
+# synthetic fixtures AND by running the real on-device probe against stub buns -
 # before any emulator boots, so the assertions cannot silently go vacuous.
 #
 # Results are per API level and are never collapsed into one verdict.
@@ -57,19 +58,36 @@ jobs:
           t=$(mktemp -d)
           trap 'rm -rf "$t"' EXIT
 
-          # A well-formed result where every probe passed.
+          # A well-formed result where every probe passed and every measurement
+          # was taken. These lines are hand-written: they exercise the LOG
+          # FORMAT the assertions accept. The VALUES (notably JIT_SIGNAL) are
+          # derived by the device script and covered by the stub runs in the
+          # next step, where the derivation itself can fail.
           cat > "$t/good.log" <<'EOF'
           BUNPROBE=1 API_LEVEL=34 ANDROID_RELEASE="14" SDK="34" ABI="x86_64" SELINUX_CTX="u:r:shell:s0" CASTORE_DIR=present CASTORE_COUNT=151 BUN=/data/local/tmp/bun
           PROBE=version STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=812 EXPECTED="1.4.2" OBSERVED="1.4.2"
+          RAW[version][1] 1.4.2
           PROBE=js-engine STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=845 EXPECTED="2" OBSERVED="2"
+          RAW[js-engine][1] 2
           PROBE=engine-usable STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=2013 EXPECTED="done" OBSERVED="done"
-          PROBE=tls STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=690 EXPECTED="200" OBSERVED="200"
+          RAW[engine-usable][1] done
+          PROBE=tls STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=690 EXPECTED="200" OBSERVED="DNS=ok STATUS=200"
+          RAW[tls][1] DNS=ok STATUS=200
+          PROBE=tls-host2 STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=655 EXPECTED="200" OBSERVED="STATUS=200"
+          RAW[tls-host2][1] STATUS=200
+          PROBE=tls-badcert STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=511 EXPECTED="FETCH_ERROR" OBSERVED="FETCH_ERROR: fetch failed code=DEPTH_ZERO_SELF_SIGNED_CERT"
+          RAW[tls-badcert][1] FETCH_ERROR: fetch failed code=DEPTH_ZERO_SELF_SIGNED_CERT
           PROBE=platform STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=820 EXPECTED="android x64" OBSERVED="android x64"
-          COLD_START_MS_SAMPLES=" 810 800 812 830 805" COLD_START_MS_MEDIAN=810 COLD_START_CLOCK=date-ns COLD_START_N=5
+          RAW[platform][1] android x64
+          COLD_START_MS_SAMPLES=" 810 800 812 830 805" COLD_START_MS_MEDIAN=810 COLD_START_MS_NET_OF_FLOOR=806 COLD_START_HARNESS_FLOOR_MS_SAMPLES=" 4 5 4 6 4" COLD_START_HARNESS_FLOOR_MS=4 COLD_START_FLOOR_STATUS=ABOVE_HARNESS_FLOOR COLD_START_CLOCK=date-ns COLD_START_N=5
           RSS_VMHWM_KB=128000 RSS_SOURCE=/proc/<pid>/status RSS_NOTE="peak RSS of a sleeping bun process, sampled ~3s after start"
           BUN_VERSION_LINE="1.4.2" BUN_REVISION="UNSUPPORTED(rc=1)"
-          JIT_MAPS_OBSERVED="hot=1 exec_anon=0 exec_file=3 w_and_x=0 sample="
-          JIT_SIGNAL=NONE JIT_DETERMINATION=OPEN JIT_BASIS="no [anon:JSJITCode] region observed in this synthetic fixture"
+          RAW[version-line][1] 1.4.2
+          JIT_MAPS_CONTROL="JIT_CONTROL exec_anon=0 exec_file=1 w_and_x=0 sample="
+          JIT_MAPS_OBSERVED="hot=1 exec_anon=1 exec_file=2 w_and_x=1 sample=[anon:JSJITCode]"
+          JIT_SIGNAL=POSITIVE JIT_DETERMINATION=SHELL_DOMAIN_CONFIRMED_APP_DOMAIN_OPEN JIT_LOOP_STATE=present JIT_CONTROL_STATE=absent JIT_RULE="derived, never hardcoded"
+          TLS_DNS=ok TLS_DNS_RULE="DNS=ENOTFOUND never reached certificate validation; DNS=ok did"
+          TLS_BADCERT_VERDICT=CERT_REJECTED TLS_BADCERT_ENDPOINT=https://self-signed.badssl.com/ TLS_BADCERT_RULE="CERT_REJECTED proves validation is on"
           BUN_PROBE_VERDICT=COMPLETE
           EXIT=0
           EOF
@@ -93,15 +111,33 @@ jobs:
             fi
           }
 
-          expect_accept "$t/good.log" 34 "all probes PASS, verdict COMPLETE, exit 0"
+          expect_accept "$t/good.log" 34 "all probes PASS, every measurement present, verdict COMPLETE, exit 0"
 
           # A crashed probe is a FINDING and must be accepted, not failed.
-          sed 's/^PROBE=version STATUS=PASS EXIT=0 SIGNAL=0/PROBE=version STATUS=CRASH EXIT=139 SIGNAL=11/' "$t/good.log" > "$t/crash.log"
+          sed -e 's|^PROBE=version STATUS=PASS EXIT=0 SIGNAL=0.*|PROBE=version STATUS=CRASH EXIT=139 SIGNAL=11 ELAPSED_MS=700 EXPECTED="1.4.2" OBSERVED="fakebun: Fatal signal 11 (SIGSEGV)"|' \
+              -e 's|^RAW\[version\]\[1\].*|RAW[version][1] fakebun: Fatal signal 11 (SIGSEGV)|' \
+              "$t/good.log" > "$t/crash.log"
           expect_accept "$t/crash.log" 34 "PROBE=version CRASH SIGNAL=11 EXIT=139 (a finding, not a failure)"
 
-          # A failed TLS probe is R3's finding and must be accepted.
-          sed 's/^PROBE=tls STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=690 EXPECTED="200" OBSERVED="200"/PROBE=tls STATUS=FAIL EXIT=9 SIGNAL=0 ELAPSED_MS=690 EXPECTED="200" OBSERVED="FETCH_ERROR: unable to verify the first certificate"/' "$t/good.log" > "$t/tls-fail.log"
-          expect_accept "$t/tls-fail.log" 34 "PROBE=tls FAIL with the raw error preserved (R3 finding)"
+          # A TLS failure that DID reach certificate validation (DNS=ok) is the
+          # real R3 finding and must be accepted.
+          sed -e 's|^PROBE=tls STATUS=PASS.*|PROBE=tls STATUS=FAIL EXIT=9 SIGNAL=0 ELAPSED_MS=690 EXPECTED="200" OBSERVED="DNS=ok FETCH_ERROR: unable to verify the first certificate"|' \
+              -e 's|^RAW\[tls\]\[1\].*|RAW[tls][1] DNS=ok FETCH_ERROR: unable to verify the first certificate|' \
+              "$t/good.log" > "$t/tls-ca-fail.log"
+          expect_accept "$t/tls-ca-fail.log" 34 "PROBE=tls FAIL with TLS_DNS=ok - certificate validation was reached and failed (R3 finding)"
+
+          # A TLS failure at name resolution (DNS=ENOTFOUND) never reached
+          # certificate validation and must be accepted, classified separately.
+          sed -e 's|^PROBE=tls STATUS=PASS.*|PROBE=tls STATUS=FAIL EXIT=9 SIGNAL=0 ELAPSED_MS=86 EXPECTED="200" OBSERVED="DNS=ENOTFOUND FETCH_ERROR: getaddrinfo ENOTFOUND api.github.com"|' \
+              -e 's|^RAW\[tls\]\[1\].*|RAW[tls][1] DNS=ENOTFOUND FETCH_ERROR: getaddrinfo ENOTFOUND api.github.com|' \
+              -e 's|^TLS_DNS=ok |TLS_DNS=ENOTFOUND |' \
+              "$t/good.log" > "$t/tls-dns-fail.log"
+          expect_accept "$t/tls-dns-fail.log" 34 "PROBE=tls FAIL with TLS_DNS=ENOTFOUND - a resolver failure, not a CA failure"
+
+          # The negative control accepted an untrusted certificate: that is a
+          # finding about the runtime, and the log is still a valid result.
+          sed 's/^TLS_BADCERT_VERDICT=CERT_REJECTED/TLS_BADCERT_VERDICT=NOT_REJECTED/' "$t/good.log" > "$t/badcert-accepted.log"
+          expect_accept "$t/badcert-accepted.log" 34 "TLS_BADCERT_VERDICT=NOT_REJECTED (a recorded finding)"
 
           # A timed-out usable-engine probe is a finding and must be accepted.
           sed 's/^PROBE=engine-usable STATUS=PASS EXIT=0 SIGNAL=0 ELAPSED_MS=2013/PROBE=engine-usable STATUS=TIMEOUT EXIT=124 SIGNAL=0 ELAPSED_MS=30000/' "$t/good.log" > "$t/timeout.log"
@@ -134,6 +170,47 @@ jobs:
           sed 's/^PROBE=version STATUS=PASS/PROBE=version STATUS=OK/' "$t/good.log" > "$t/bad-status.log"
           expect_reject "$t/bad-status.log" 34 "a probe with an unknown STATUS"
 
+          # The device's own SDK must agree with the matrix's API_LEVEL: a leg
+          # booted with the wrong system image is labelled with the requested
+          # level by API_LEVEL alone.
+          sed 's/SDK="34"/SDK="31"/' "$t/good.log" > "$t/wrong-sdk.log"
+          expect_reject "$t/wrong-sdk.log" 34 "the device's own SDK disagrees with the requested API level"
+
+          sed 's/CASTORE_COUNT=151/CASTORE_COUNT=151 API_LEVEL_MISMATCH=34-vs-31/' "$t/good.log" > "$t/api-mismatch.log"
+          expect_reject "$t/api-mismatch.log" 34 "the device recorded API_LEVEL_MISMATCH"
+
+          sed 's/ABI="x86_64"/ABI="arm64-v8a"/' "$t/good.log" > "$t/wrong-abi.log"
+          expect_reject "$t/wrong-abi.log" 34 "the executing ABI is not the x86_64 image this harness fetches"
+
+          # A run that measured nothing is not a result. Every measurement line
+          # stripped: R1, R3 and R6 have no evidence in this log at all.
+          grep -vE '^(COLD_START_|RSS_VMHWM_KB=|BUN_VERSION_LINE=|JIT_|TLS_DNS=|TLS_BADCERT_VERDICT=)' "$t/good.log" > "$t/no-measurements.log"
+          expect_reject "$t/no-measurements.log" 34 "every R1/R3/R6 measurement line stripped"
+
+          # RSS_VMHWM_KB=unavailable is reachable on the device (an unreadable
+          # /proc/<pid>/status) and would fill the report's table with an empty
+          # cell; the log must be rejected instead.
+          sed 's/^RSS_VMHWM_KB=128000/RSS_VMHWM_KB=unavailable/' "$t/good.log" > "$t/rss-unavailable.log"
+          expect_reject "$t/rss-unavailable.log" 34 "RSS measured as unavailable"
+
+          sed 's/JIT_SIGNAL=POSITIVE/JIT_SIGNAL=PROBABLY/' "$t/good.log" > "$t/bad-jit-signal.log"
+          expect_reject "$t/bad-jit-signal.log" 34 "a JIT_SIGNAL outside the documented set"
+
+          sed 's/JIT_DETERMINATION=SHELL_DOMAIN_CONFIRMED_APP_DOMAIN_OPEN/JIT_DETERMINATION=CONFIRMED/' "$t/good.log" > "$t/bad-jit-determination.log"
+          expect_reject "$t/bad-jit-determination.log" 34 "a JIT_DETERMINATION outside the documented set"
+
+          sed 's/COLD_START_MS_SAMPLES=" 810 800 812 830 805"/COLD_START_MS_SAMPLES=" 810 800 812 830"/' "$t/good.log" > "$t/four-samples.log"
+          expect_reject "$t/four-samples.log" 34 "four cold-start samples instead of five"
+
+          sed 's/ COLD_START_HARNESS_FLOOR_MS=4 / /' "$t/good.log" > "$t/no-floor.log"
+          expect_reject "$t/no-floor.log" 34 "no cold-start harness floor (the figure cannot be attributed to Bun)"
+
+          sed 's/TLS_BADCERT_VERDICT=CERT_REJECTED/TLS_BADCERT_VERDICT=REJECTED/' "$t/good.log" > "$t/bad-badcert.log"
+          expect_reject "$t/bad-badcert.log" 34 "a TLS_BADCERT_VERDICT outside the documented set"
+
+          grep -v '^RAW\[platform\]' "$t/good.log" > "$t/no-raw.log"
+          expect_reject "$t/no-raw.log" 34 "a probe reported output but preserved no RAW[] record"
+
           : > "$t/empty.log"
           expect_reject "$t/empty.log" 34 "no output at all"
 
@@ -143,31 +220,70 @@ jobs:
           fi
           echo "harness self-test (assertions): all cases behaved as specified"
 
-      - name: The real on-device probe runs end to end against a stub bun
+      - name: The real on-device probe derives its verdicts against stub buns
         run: |
           set -euo pipefail
           mkdir -p out
-          cat > out/fakebun <<'EOF'
+
+          # One stub program, four /proc/self/maps answers. The dispatch is on
+          # substrings of the JS program and falls through to exit 64 on drift,
+          # which the all-probes-PASS check below turns into a visible failure.
+          base=$(mktemp)
+          cat > "$base" <<'STUB'
           #!/bin/sh
           if [ "$1" = "--version" ]; then echo "1.4.2"; exit 0; fi
           if [ "$1" = "--revision" ]; then echo "fakebun-revision-1"; exit 0; fi
           program="$2"
           case "$program" in
+            *JIT_CONTROL*) echo "@@CONTROL@@"; exit @@CONTROL_RC@@ ;;
+            *"/proc/self/maps"*) echo "@@MAPS@@"; exit @@MAPS_RC@@ ;;
+            *badssl*) echo "FETCH_ERROR: fetch failed code=DEPTH_ZERO_SELF_SIGNED_CERT" ;;
+            *"fetch("*) case "$program" in
+                *example.com*) echo "STATUS=200" ;;
+                *) echo "DNS=ok STATUS=200" ;;
+              esac ;;
             *"console.log(1+1)"*) echo 2 ;;
-            *"for(let i=0;i<3e7"*) echo done ;;
-            *"fetch("*) echo 200 ;;
+            *"for(let i=0;i<3e7"*) echo "done 1539553984" ;;
             *"process.platform"*) echo "android x64" ;;
-            *"/proc/self/maps"*) echo "hot=1 exec_anon=1 exec_file=2 w_and_x=1 sample=[anon:JSJITCode]" ;;
             *"setTimeout"*) sleep 8 ;;
             *) echo "fakebun: unknown program" >&2; exit 64 ;;
           esac
-          EOF
+          STUB
+          chmod 755 "$base"
+
+          gen_stub() {
+            sed -e "s|@@MAPS@@|$2|" -e "s|@@MAPS_RC@@|$3|" \
+                -e "s|@@CONTROL@@|$4|" -e "s|@@CONTROL_RC@@|$5|" "$base" > "out/fakebun-$1"
+            chmod 755 "out/fakebun-$1"
+          }
+
+          region="[anon:JSJITCode]"
+          nojit="exec_anon=0 exec_file=1 w_and_x=0 sample="
+          # hot loop maps the JIT region; the control process does not
+          gen_stub good "hot=1 exec_anon=1 exec_file=2 w_and_x=1 sample=$region" 0 "$nojit" 0
+          # no executable anonymous mapping at all
+          gen_stub nojit "hot=1 exec_anon=0 exec_file=2 w_and_x=0 sample=" 0 "$nojit" 0
+          # /proc/self/maps unreadable
+          gen_stub mapsfail "maps read failed: EACCES /proc/self/maps" 1 "maps read failed: EACCES /proc/self/maps" 1
+          # the region exists in the CONTROL process too, so its presence says
+          # nothing about the hot loop
+          gen_stub jitincontrol "hot=1 exec_anon=1 exec_file=2 w_and_x=1 sample=$region" 0 "exec_anon=1 exec_file=1 w_and_x=1 sample=$region" 0
+
           cat > out/fakebun-crash <<'EOF'
           #!/bin/sh
-          if [ "$1" = "--version" ]; then kill -SEGV $$; fi
-          echo "fakebun-crash" >&2; exit 64
+          # A segfaulting Bun that prints a stack trace: every line of it has to
+          # survive into the log, not just its first line.
+          if [ "$1" = "--version" ]; then
+            printf '%s\n' "fakebun-crash: Fatal signal 11 (SIGSEGV), code 1, addr 0x0000000000123456" "  #00 pc 0000000000012abc  /data/local/tmp/bun" "  #01 pc 0000000000009f10  /data/local/tmp/bun" >&2
+            kill -SEGV $$
+          fi
+          case "$2" in
+            *"setTimeout"*) sleep 8 ;;
+          esac
+          printf '%s\n' "fakebun-crash: line one" "fakebun-crash: line two" "fakebun-crash: line three" >&2
+          exit 64
           EOF
-          chmod 755 out/fakebun out/fakebun-crash
+          chmod 755 out/fakebun-crash
 
           # Keep the device script valid POSIX sh.
           sh -n scripts/bun-probe-device.sh
@@ -184,32 +300,89 @@ jobs:
             return "$rc"
           }
 
-          # 1. Happy path: the whole harness produces a COMPLETE result that the
-          #    assert script accepts.
-          run_device_probe "$PWD/out/fakebun" out/stub-good.log
+          check_jit() { # log expected-signal expected-determination label
+            log="$1"; sig="$2"; det="$3"; label="$4"
+            if ! grep -q "^JIT_SIGNAL=$sig " "$log"; then
+              echo "::error::$label: expected JIT_SIGNAL=$sig"
+              grep '^JIT_' "$log" || true
+              exit 1
+            fi
+            if ! grep -q "JIT_DETERMINATION=$det " "$log"; then
+              echo "::error::$label: expected JIT_DETERMINATION=$det"
+              grep '^JIT_' "$log" || true
+              exit 1
+            fi
+          }
+
+          # 1. Happy path: every probe PASSES (not merely reports), the whole
+          #    harness produces a COMPLETE result, and the JIT region in the
+          #    hot-loop process but not in the control yields POSITIVE.
+          run_device_probe "$PWD/out/fakebun-good" out/stub-good.log
           cat out/stub-good.log
           bash scripts/assert-bun-log.sh out/stub-good.log 34
+          for p in version js-engine engine-usable tls tls-host2 tls-badcert platform; do
+            grep -q "^PROBE=$p STATUS=PASS " out/stub-good.log || {
+              echo "::error::the happy-path stub did not PASS probe $p - the stub dispatch has drifted from the device script"
+              cat out/stub-good.log
+              exit 1
+            }
+          done
+          check_jit out/stub-good.log POSITIVE SHELL_DOMAIN_CONFIRMED_APP_DOMAIN_OPEN "stub-good"
 
-          # The JIT signal must be DERIVED from the observed mapping, not
-          # hardcoded: a [anon:JSJITCode] region has to yield POSITIVE. If this
-          # ever stops holding, the R1 verdict in the logs is untrustworthy.
-          grep -q '^JIT_SIGNAL=POSITIVE ' out/stub-good.log || {
-            echo "::error::a [anon:JSJITCode] mapping did not yield JIT_SIGNAL=POSITIVE"
+          # The R3 classification must also be derived, not defaulted: a stub that
+          # printed a resolvable host and a refused untrusted certificate has to
+          # come out as TLS_DNS=ok / CERT_REJECTED.
+          grep -q '^TLS_DNS=ok ' out/stub-good.log || {
+            echo "::error::a resolvable primary host did not classify as TLS_DNS=ok"
+            cat out/stub-good.log
+            exit 1
+          }
+          grep -q '^TLS_BADCERT_VERDICT=CERT_REJECTED ' out/stub-good.log || {
+            echo "::error::a refused untrusted certificate did not classify as CERT_REJECTED"
             cat out/stub-good.log
             exit 1
           }
 
-          # 2. Crash path: a segfaulting bun's SIGSEGV is detected and preserved,
-          #    and the harness still reaches COMPLETE.
+          # 2. No JIT region in either process: NONE, and the determination
+          #    falls back to OPEN. This is the OPEN fallback, the exact property
+          #    R1 rests on: replace the derivation in the device script with an
+          #    unconditional jit_signal=POSITIVE and this case fails here, not
+          #    silently in a later run's logs.
+          run_device_probe "$PWD/out/fakebun-nojit" out/stub-nojit.log
+          bash scripts/assert-bun-log.sh out/stub-nojit.log 34
+          check_jit out/stub-nojit.log NONE OPEN "stub-nojit"
+
+          # 3. An unreadable /proc/self/maps is INCONCLUSIVE, never POSITIVE.
+          run_device_probe "$PWD/out/fakebun-mapsfail" out/stub-mapsfail.log
+          bash scripts/assert-bun-log.sh out/stub-mapsfail.log 34
+          check_jit out/stub-mapsfail.log INCONCLUSIVE OPEN "stub-mapsfail"
+
+          # 4. The region is present in the control process too (JSC reserves it
+          #    at code-cache construction), so its presence is not attributable
+          #    to the hot loop: INCONCLUSIVE, determination OPEN.
+          run_device_probe "$PWD/out/fakebun-jitincontrol" out/stub-jitincontrol.log
+          bash scripts/assert-bun-log.sh out/stub-jitincontrol.log 34
+          check_jit out/stub-jitincontrol.log INCONCLUSIVE OPEN "stub-jitincontrol"
+
+          # 5. Crash path: a segfaulting bun's SIGSEGV is detected, and the whole
+          #    stack trace is preserved as RAW records rather than truncated to
+          #    the first line of OBSERVED.
           run_device_probe "$PWD/out/fakebun-crash" out/stub-crash.log
           grep -q '^PROBE=version STATUS=CRASH EXIT=139 SIGNAL=11 ' out/stub-crash.log || {
             echo "::error::the harness did not record the stub's SIGSEGV as CRASH SIGNAL=11"
             cat out/stub-crash.log
             exit 1
           }
+          for n in 1 2 3; do
+            grep -q "^RAW\[version\]\[$n\] .*pc 0" out/stub-crash.log && continue
+            grep -q "^RAW\[version\]\[$n\] fakebun-crash:" out/stub-crash.log && continue
+            echo "::error::the crash stub's output line $n was not preserved as RAW[version][$n]"
+            cat out/stub-crash.log
+            exit 1
+          done
           bash scripts/assert-bun-log.sh out/stub-crash.log 34
 
-          # 3. Missing binary: HARNESS_BROKEN must be rejected by the assert.
+          # 6. Missing binary: HARNESS_BROKEN must be rejected by the assert.
           #    The device script exits 4 here, which is expected, not a failure.
           run_device_probe /nonexistent/bun out/stub-missing.log || true
           grep -q '^BUN_PROBE_VERDICT=HARNESS_BROKEN ' out/stub-missing.log || {
@@ -266,7 +439,7 @@ jobs:
 
             readelf -d "$bin" | tee "out/$label-dyn.txt"
             if grep -q 'libc\.so\.6' "out/$label-dyn.txt"; then echo "::error::$label links against glibc"; exit 1; fi
-            if grep -q 'ld-linux-' "out/$label-dyn.txt"; then echo "::error::$label links against the glibc loader"; exit 1; fi
+            if grep -q 'ld-linux-' "out/$label-dyn.txt"; then echo "::error::$label links the glibc loader"; exit 1; fi
             grep -q 'libc\.so' "out/$label-dyn.txt" || { echo "::error::$label does not link bionic libc"; exit 1; }
 
             sha256sum "$bin" | tee "out/$label-sha256.txt"
@@ -384,13 +557,24 @@ jobs:
       - name: One outcome per API level, recorded separately
         run: |
           set -uo pipefail
-          summary=bun-summary.md
+          probes="version js-engine engine-usable tls tls-host2 tls-badcert platform"
+          head_out=$(mktemp)
+          meas_out=$(mktemp)
           {
             echo "### R1/R3/R6 - Bun Android runtime, per API level"
             echo
-            echo "| API | verdict | version | js-engine | engine-usable | tls (R3) | platform | cold-start ms | RSS KB | JIT |"
+            echo "Probe outcomes. CRASH/FAIL/TIMEOUT are findings, not harness failures."
+            echo
+            echo "| API | verdict | version | js-engine | engine-usable | tls | tls-host2 | tls-badcert | platform | tls DNS |"
             echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
-          } > "$summary"
+          } > "$head_out"
+          {
+            echo
+            echo "Measurements. JIT determination stays OPEN unless the hot-loop process shows the JIT region *and* a control process with no hot loop does not."
+            echo
+            echo "| API | cold start median (ms) | net of harness floor (ms) | floor status | peak RSS (KB) | JIT signal | JIT determination | untrusted-cert verdict |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
+          } > "$meas_out"
 
           missing=""
           findings=""
@@ -398,28 +582,36 @@ jobs:
             log="logs/bun-$api.log"
             if [ ! -s "$log" ]; then
               missing="$missing $api"
-              echo "| $api | NO RESULT - harness broken | - | - | - | - | - | - | - | - |" >> "$summary"
+              echo "| $api | NO RESULT - harness broken | - | - | - | - | - | - | - | - |" >> "$head_out"
+              echo "| $api | - | - | - | - | - | - | - |" >> "$meas_out"
               continue
             fi
             if ! bash scripts/assert-bun-log.sh "$log" "$api" | tee "logs/assert-$api.txt"; then
-              echo "::error::API $api produced a malformed probe log"
+              echo "::error::API $api produced a malformed or incomplete probe log"
               exit 1
             fi
             status_of() { grep -E "^PROBE=$1 " "$log" | sed -E 's/^PROBE=[^ ]+ STATUS=([^ ]+).*/\1/'; }
-            version=$(grep -oE '^BUN_VERSION_LINE="[^"]*"' "$log" | sed 's/^BUN_VERSION_LINE="//; s/"$//')
-            cold=$(grep -oE 'COLD_START_MS_MEDIAN=[0-9]+' "$log" | cut -d= -f2)
-            rss=$(grep -oE 'RSS_VMHWM_KB=[^ ]+' "$log" | cut -d= -f2)
-            jit=$(grep -oE 'JIT_DETERMINATION=[^ ]+' "$log" | cut -d= -f2)
-            echo "| $api | COMPLETE | $version | $(status_of js-engine) | $(status_of engine-usable) | $(status_of tls) | $(status_of platform) | $cold | $rss | $jit |" >> "$summary"
+            kv() { grep -oE "$1=[^ ]+" "$log" | head -1 | cut -d= -f2- | sed 's/^"//; s/"$//'; }
 
-            for p in version js-engine engine-usable tls platform; do
+            row="| $api | COMPLETE |"
+            for p in $probes; do row="$row $(status_of "$p") |"; done
+            echo "$row $(kv TLS_DNS) |" >> "$head_out"
+
+            echo "| $api | $(kv COLD_START_MS_MEDIAN) | $(kv COLD_START_MS_NET_OF_FLOOR) | $(kv COLD_START_FLOOR_STATUS) | $(kv RSS_VMHWM_KB) | $(kv JIT_SIGNAL) | $(kv JIT_DETERMINATION) | $(kv TLS_BADCERT_VERDICT) |" >> "$meas_out"
+
+            for p in $probes; do
               s=$(status_of "$p")
               case "$s" in
                 PASS|"") ;;
                 *) findings="$findings API$api:$p=$s" ;;
               esac
             done
+            [ "$(kv TLS_BADCERT_VERDICT)" = "CERT_REJECTED" ] || findings="$findings API$api:badcert=$(kv TLS_BADCERT_VERDICT)"
+            [ "$(kv JIT_SIGNAL)" = "POSITIVE" ] || findings="$findings API$api:jit=$(kv JIT_SIGNAL)"
           done
+
+          summary=bun-summary.md
+          cat "$head_out" "$meas_out" > "$summary"
 
           echo >> "$summary"
           if [ -n "$missing" ]; then
@@ -431,13 +623,17 @@ jobs:
           fi
 
           echo "API levels probed: 30, 34, 35 (x86_64 emulator, run ${GITHUB_RUN_ID})" >> "$summary"
+          echo >> "$summary"
+          echo "**R3 classification rule applied.** \`TLS_DNS=ENOTFOUND\` means the request never reached certificate validation (resolver failure, not a CA failure). \`TLS_DNS=ok\` with a failing \`tls\` probe means the handshake and certificate validation were reached and failed: that is an R3 finding. \`TLS_BADCERT_VERDICT=CERT_REJECTED\` is the negative control on an untrusted certificate - it is what proves certificate validation is on at all. None of these establish *which* trust store was used (Android system vs Bun-bundled)." >> "$summary"
+          echo >> "$summary"
+          echo "**R6 measurement rule applied.** Cold start is the median of 5 \`bun --version\` runs bracketed by the same clock used for every other timing figure; \`net of harness floor\` subtracts the median of 5 runs of the *same bracket with no work between the two clock reads*, so a value at or below the floor is reported as \`INDISTINGUISHABLE_FROM_HARNESS_FLOOR\` rather than as Bun's startup." >> "$summary"
           if [ -n "$findings" ]; then
             echo >> "$summary"
             echo "**Findings (not harness failures):${findings}** - read docs/spikes/r1-bun.md." >> "$summary"
             echo "::warning::Bun probe findings on emulator:${findings} - these are recorded results, not a broken harness"
           else
             echo >> "$summary"
-            echo "All five probes PASS on all three API levels." >> "$summary"
+            echo "All seven probes PASS on all three API levels." >> "$summary"
           fi
 
           cat "$summary"
